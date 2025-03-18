@@ -187,7 +187,6 @@ func ginHandler(auth *GinJWTMiddleware[*Login]) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 
-	tonic.SetErrorHook(ErrHook)
 	r.POST("/login", tonic.Handler(auth.LoginHandler, 200))
 	r.POST("/logout", tonic.Handler(auth.LogoutHandler, 200))
 	// test token in path
