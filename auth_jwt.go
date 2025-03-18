@@ -16,6 +16,14 @@ import (
 	"github.com/youmark/pkcs8"
 )
 
+type AuthResponse struct {
+	Message string `json:"message"`
+	Code    int    `json:"code"`
+	Token   string `json:"token"`
+	Expire  string `json:"expire"`
+	Cookie  string `json:"cookie"`
+}
+
 // GinJWTMiddleware provides a Json-Web-Token authentication implementation. On failure, a 401 HTTP response
 // is returned. On success, the wrapped middleware is called, and the userID is made available as
 // c.Get("userID").(string).
@@ -69,13 +77,13 @@ type GinJWTMiddleware[K interface{}] struct {
 	Unauthorized func(c *gin.Context, code int, message string)
 
 	// User can define own LoginResponse func.
-	LoginResponse func(c *gin.Context, code int, message string, time time.Time) (gin.H, error)
+	LoginResponse func(c *gin.Context, code int, message string, time time.Time) (*AuthResponse, error)
 
 	// User can define own LogoutResponse func.
-	LogoutResponse func(c *gin.Context, code int)
+	LogoutResponse func(c *gin.Context, code int) (*AuthResponse, error)
 
 	// User can define own RefreshResponse func.
-	RefreshResponse func(c *gin.Context, code int, message string, time time.Time) (gin.H, error)
+	RefreshResponse func(c *gin.Context, code int, message string, time time.Time) (*AuthResponse, error)
 
 	// Set the identity handler function
 	IdentityHandler func(*gin.Context) interface{}
@@ -355,29 +363,31 @@ func (mw *GinJWTMiddleware[K]) MiddlewareInit() error {
 	}
 
 	if mw.LoginResponse == nil {
-		mw.LoginResponse = func(c *gin.Context, code int, token string, expire time.Time) (gin.H, error) {
-			return gin.H{
-				"code":   http.StatusOK,
-				"token":  token,
-				"expire": expire.Format(time.RFC3339),
+		mw.LoginResponse = func(c *gin.Context, code int, token string, expire time.Time) (*AuthResponse, error) {
+			return &AuthResponse{
+				Code:   http.StatusOK,
+				Token:  token,
+				Expire: expire.Format(time.RFC3339),
 			}, nil
 		}
 	}
 
 	if mw.LogoutResponse == nil {
-		mw.LogoutResponse = func(c *gin.Context, code int) {
-			c.JSON(http.StatusOK, gin.H{
-				"code": http.StatusOK,
-			})
+		mw.LogoutResponse = func(c *gin.Context, code int) (*AuthResponse, error) {
+			return &AuthResponse{
+				Code: http.StatusOK,
+			}, nil
+
 		}
 	}
 
 	if mw.RefreshResponse == nil {
-		mw.RefreshResponse = func(c *gin.Context, code int, token string, expire time.Time) (gin.H, error) {
-			return gin.H{
-				"code":   http.StatusOK,
-				"token":  token,
-				"expire": expire.Format(time.RFC3339),
+		mw.RefreshResponse = func(c *gin.Context, code int, token string, expire time.Time) (*AuthResponse, error) {
+
+			return &AuthResponse{
+				Code:   http.StatusOK,
+				Token:  token,
+				Expire: expire.Format(time.RFC3339),
 			}, nil
 		}
 	}
@@ -505,10 +515,35 @@ func (mw *GinJWTMiddleware[K]) GetClaimsFromJWT(c *gin.Context) (jwt.MapClaims, 
 	return claims, nil
 }
 
+func ErrHook(c *gin.Context, e error) (int, interface{}) {
+
+	errcode, errpl := 500, e.Error()
+	if _, ok := e.(tonic.BindError); ok {
+		errcode, errpl = 401, ErrMissingLoginValues.Error()
+	} else {
+		switch {
+		case jujuErr.Is(e, jujuErr.BadRequest) || jujuErr.Is(e, jujuErr.NotValid) || jujuErr.Is(e, jujuErr.AlreadyExists) || jujuErr.Is(e, jujuErr.NotSupported) || jujuErr.Is(e, jujuErr.NotAssigned) || jujuErr.Is(e, jujuErr.NotProvisioned):
+			errcode, errpl = 400, e.Error()
+		case jujuErr.Is(e, jujuErr.Forbidden):
+			errcode, errpl = 403, e.Error()
+		case jujuErr.Is(e, jujuErr.MethodNotAllowed):
+			errcode, errpl = 405, e.Error()
+		case jujuErr.Is(e, jujuErr.NotFound) || jujuErr.Is(e, jujuErr.UserNotFound):
+			errcode, errpl = 404, e.Error()
+		case jujuErr.Is(e, jujuErr.Unauthorized):
+			errcode, errpl = 401, e.Error()
+		case jujuErr.Is(e, jujuErr.NotImplemented):
+			errcode, errpl = 501, e.Error()
+		}
+	}
+
+	return errcode, gin.H{"message": errpl}
+}
+
 // LoginHandler can be used by clients to get a jwt token.
 // Payload needs to be json in the form of {"username": "USERNAME", "password": "PASSWORD"}.
 // Reply will be of the form {"token": "TOKEN"}.
-func (mw *GinJWTMiddleware[K]) LoginHandler(c *gin.Context, req K) (gin.H, error) {
+func (mw *GinJWTMiddleware[K]) LoginHandler(c *gin.Context, req K) (*AuthResponse, error) {
 
 	if mw.Authenticator == nil {
 		return nil, errors.New(ErrMissingAuthenticatorFunc.Error())
@@ -548,33 +583,8 @@ type AuthError struct {
 	Message string `json:"message"`
 }
 
-func ErrHook(c *gin.Context, e error) (int, interface{}) {
-
-	errcode, errpl := 500, e.Error()
-	if _, ok := e.(tonic.BindError); ok {
-		errcode, errpl = 401, ErrMissingLoginValues.Error()
-	} else {
-		switch {
-		case jujuErr.Is(e, jujuErr.BadRequest) || jujuErr.Is(e, jujuErr.NotValid) || jujuErr.Is(e, jujuErr.AlreadyExists) || jujuErr.Is(e, jujuErr.NotSupported) || jujuErr.Is(e, jujuErr.NotAssigned) || jujuErr.Is(e, jujuErr.NotProvisioned):
-			errcode, errpl = 400, e.Error()
-		case jujuErr.Is(e, jujuErr.Forbidden):
-			errcode, errpl = 403, e.Error()
-		case jujuErr.Is(e, jujuErr.MethodNotAllowed):
-			errcode, errpl = 405, e.Error()
-		case jujuErr.Is(e, jujuErr.NotFound) || jujuErr.Is(e, jujuErr.UserNotFound):
-			errcode, errpl = 404, e.Error()
-		case jujuErr.Is(e, jujuErr.Unauthorized):
-			errcode, errpl = 401, e.Error()
-		case jujuErr.Is(e, jujuErr.NotImplemented):
-			errcode, errpl = 501, e.Error()
-		}
-	}
-
-	return errcode, gin.H{"message": errpl}
-}
-
 // LogoutHandler can be used by clients to remove the jwt cookie (if set)
-func (mw *GinJWTMiddleware[K]) LogoutHandler(c *gin.Context) (gin.H, error) {
+func (mw *GinJWTMiddleware[K]) LogoutHandler(c *gin.Context) (*AuthResponse, error) {
 	// delete auth cookie
 	if mw.SendCookie {
 		if mw.CookieSameSite != 0 {
@@ -592,9 +602,7 @@ func (mw *GinJWTMiddleware[K]) LogoutHandler(c *gin.Context) (gin.H, error) {
 		)
 	}
 
-	return gin.H{
-		"message": "OK",
-	}, nil
+	return mw.LogoutResponse(c, 200)
 }
 
 func (mw *GinJWTMiddleware[K]) signedString(token *jwt.Token) (string, error) {
@@ -611,7 +619,7 @@ func (mw *GinJWTMiddleware[K]) signedString(token *jwt.Token) (string, error) {
 // RefreshHandler can be used to refresh a token. The token still needs to be valid on refresh.
 // Shall be put under an endpoint that is using the GinJWTMiddleware.
 // Reply will be of the form {"token": "TOKEN"}.
-func (mw *GinJWTMiddleware[K]) RefreshHandler(c *gin.Context) (gin.H, error) {
+func (mw *GinJWTMiddleware[K]) RefreshHandler(c *gin.Context) (*AuthResponse, error) {
 	tokenString, expire, err := mw.RefreshToken(c)
 	if err != nil {
 		return nil, jujuErr.NewUnauthorized(err, err.Error())

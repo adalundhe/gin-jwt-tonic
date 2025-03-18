@@ -251,18 +251,18 @@ func TestLoginHandler(t *testing.T) {
 		Authorizator: func(user interface{}, c *gin.Context) bool {
 			return true
 		},
-		LoginResponse: func(c *gin.Context, code int, token string, t time.Time) (gin.H, error) {
+		LoginResponse: func(c *gin.Context, code int, token string, t time.Time) (*AuthResponse, error) {
 			cookie, err := c.Cookie("jwt")
 			if err != nil {
 				log.Println(err)
 			}
 
-			return gin.H{
-				"code":    http.StatusOK,
-				"token":   token,
-				"expire":  t.Format(time.RFC3339),
-				"message": "login successfully",
-				"cookie":  cookie,
+			return &AuthResponse{
+				Code:    http.StatusOK,
+				Token:   token,
+				Expire:  t.Format(time.RFC3339),
+				Message: "login successfully",
+				Cookie:  cookie,
 			}, nil
 		},
 		SendCookie:   true,
@@ -479,18 +479,18 @@ func TestRefreshHandlerRS256(t *testing.T) {
 		SendCookie:       true,
 		CookieName:       "jwt",
 		Authenticator:    defaultAuthenticator,
-		RefreshResponse: func(c *gin.Context, code int, token string, t time.Time) (gin.H, error) {
+		RefreshResponse: func(c *gin.Context, code int, token string, t time.Time) (*AuthResponse, error) {
 			cookie, err := c.Cookie("jwt")
 			if err != nil {
 				return nil, err
 			}
 
-			return gin.H{
-				"code":    http.StatusOK,
-				"token":   token,
-				"expire":  t.Format(time.RFC3339),
-				"message": "refresh successfully",
-				"cookie":  cookie,
+			return &AuthResponse{
+				Code:    http.StatusOK,
+				Token:   token,
+				Expire:  t.Format(time.RFC3339),
+				Message: "refresh successfully",
+				Cookie:  cookie,
 			}, nil
 		},
 	})

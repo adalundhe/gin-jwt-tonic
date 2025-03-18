@@ -7,6 +7,7 @@ require (
 	github.com/gin-gonic/gin v1.10.0
 	github.com/golang-jwt/jwt/v4 v4.5.1
 	github.com/juju/errors v1.0.0
+	github.com/loopfz/gadgeto v0.11.4
 	github.com/stretchr/testify v1.10.0
 	github.com/tidwall/gjson v1.17.1
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78
@@ -29,7 +30,6 @@ require (
 	github.com/klauspost/cpuid/v2 v2.2.9 // indirect
 	github.com/kr/pretty v0.3.0 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
-	github.com/loopfz/gadgeto v0.11.4 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
