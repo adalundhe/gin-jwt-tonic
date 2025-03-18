@@ -537,7 +537,10 @@ func ErrHook(c *gin.Context, e error) (int, interface{}) {
 		}
 	}
 
-	return errcode, gin.H{"message": errpl}
+	return errcode, &AuthResponse{
+		Message: errpl,
+		Code:    errcode,
+	}
 }
 
 // LoginHandler can be used by clients to get a jwt token.
