@@ -233,7 +233,6 @@ var (
 
 // New for check error with GinJWTMiddleware
 func New[K interface{}](m *GinJWTMiddleware[K]) (*GinJWTMiddleware[K], error) {
-	tonic.SetErrorHook(ErrHook)
 	if err := m.MiddlewareInit(); err != nil {
 		return nil, err
 	}
