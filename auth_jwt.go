@@ -505,15 +505,6 @@ func (mw *GinJWTMiddleware[K]) GetClaimsFromJWT(c *gin.Context) (jwt.MapClaims, 
 	return claims, nil
 }
 
-type LoginRequest struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
-}
-
-type AuthResponse struct {
-	Message string `json:"message"`
-}
-
 // LoginHandler can be used by clients to get a jwt token.
 // Payload needs to be json in the form of {"username": "USERNAME", "password": "PASSWORD"}.
 // Reply will be of the form {"token": "TOKEN"}.
@@ -583,7 +574,7 @@ func ErrHook(c *gin.Context, e error) (int, interface{}) {
 }
 
 // LogoutHandler can be used by clients to remove the jwt cookie (if set)
-func (mw *GinJWTMiddleware[K]) LogoutHandler(c *gin.Context) (*AuthResponse, error) {
+func (mw *GinJWTMiddleware[K]) LogoutHandler(c *gin.Context) (gin.H, error) {
 	// delete auth cookie
 	if mw.SendCookie {
 		if mw.CookieSameSite != 0 {
@@ -601,8 +592,8 @@ func (mw *GinJWTMiddleware[K]) LogoutHandler(c *gin.Context) (*AuthResponse, err
 		)
 	}
 
-	return &AuthResponse{
-		Message: "OK",
+	return gin.H{
+		"message": "OK",
 	}, nil
 }
 
