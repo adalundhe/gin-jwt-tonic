@@ -11,6 +11,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v4"
+	jujuErr "github.com/juju/errors"
+	"github.com/loopfz/gadgeto/tonic"
 	"github.com/youmark/pkcs8"
 )
 
@@ -19,7 +21,7 @@ import (
 // c.Get("userID").(string).
 // Users can get a token by posting a json request to LoginHandler. The token then needs to be passed in
 // the Authentication header. Example: Authorization:Bearer XXX_TOKEN_XXX
-type GinJWTMiddleware struct {
+type GinJWTMiddleware[K interface{}] struct {
 	// Realm name to display to the user. Required.
 	Realm string
 
@@ -48,7 +50,7 @@ type GinJWTMiddleware struct {
 	// Callback function that should perform the authentication of the user based on login info.
 	// Must return user data as user identifier, it will be stored in Claim Array. Required.
 	// Check error (e) to determine the appropriate error message.
-	Authenticator func(c *gin.Context) (interface{}, error)
+	Authenticator func(c *gin.Context, req K) (interface{}, error)
 
 	// Callback function that should perform the authorization of the authenticated user. Called
 	// only after an authentication success. Must return true on success, false on failure.
@@ -67,13 +69,13 @@ type GinJWTMiddleware struct {
 	Unauthorized func(c *gin.Context, code int, message string)
 
 	// User can define own LoginResponse func.
-	LoginResponse func(c *gin.Context, code int, message string, time time.Time)
+	LoginResponse func(c *gin.Context, code int, message string, time time.Time) (gin.H, error)
 
 	// User can define own LogoutResponse func.
 	LogoutResponse func(c *gin.Context, code int)
 
 	// User can define own RefreshResponse func.
-	RefreshResponse func(c *gin.Context, code int, message string, time time.Time)
+	RefreshResponse func(c *gin.Context, code int, message string, time time.Time) (gin.H, error)
 
 	// Set the identity handler function
 	IdentityHandler func(*gin.Context) interface{}
@@ -222,7 +224,7 @@ var (
 )
 
 // New for check error with GinJWTMiddleware
-func New(m *GinJWTMiddleware) (*GinJWTMiddleware, error) {
+func New[K interface{}](m *GinJWTMiddleware[K]) (*GinJWTMiddleware[K], error) {
 	if err := m.MiddlewareInit(); err != nil {
 		return nil, err
 	}
@@ -230,7 +232,7 @@ func New(m *GinJWTMiddleware) (*GinJWTMiddleware, error) {
 	return m, nil
 }
 
-func (mw *GinJWTMiddleware) readKeys() error {
+func (mw *GinJWTMiddleware[K]) readKeys() error {
 	err := mw.privateKey()
 	if err != nil {
 		return err
@@ -243,7 +245,7 @@ func (mw *GinJWTMiddleware) readKeys() error {
 	return nil
 }
 
-func (mw *GinJWTMiddleware) privateKey() error {
+func (mw *GinJWTMiddleware[K]) privateKey() error {
 	var keyData []byte
 	var err error
 	if mw.PrivKeyFile == "" {
@@ -280,7 +282,7 @@ func (mw *GinJWTMiddleware) privateKey() error {
 	return nil
 }
 
-func (mw *GinJWTMiddleware) publicKey() error {
+func (mw *GinJWTMiddleware[K]) publicKey() error {
 	var keyData []byte
 	if mw.PubKeyFile == "" {
 		keyData = mw.PubKeyBytes
@@ -300,7 +302,7 @@ func (mw *GinJWTMiddleware) publicKey() error {
 	return nil
 }
 
-func (mw *GinJWTMiddleware) usingPublicKeyAlgo() bool {
+func (mw *GinJWTMiddleware[K]) usingPublicKeyAlgo() bool {
 	switch mw.SigningAlgorithm {
 	case "RS256", "RS512", "RS384":
 		return true
@@ -309,7 +311,7 @@ func (mw *GinJWTMiddleware) usingPublicKeyAlgo() bool {
 }
 
 // MiddlewareInit initialize jwt configs.
-func (mw *GinJWTMiddleware) MiddlewareInit() error {
+func (mw *GinJWTMiddleware[K]) MiddlewareInit() error {
 	if mw.TokenLookup == "" {
 		mw.TokenLookup = "header:Authorization"
 	}
@@ -353,12 +355,12 @@ func (mw *GinJWTMiddleware) MiddlewareInit() error {
 	}
 
 	if mw.LoginResponse == nil {
-		mw.LoginResponse = func(c *gin.Context, code int, token string, expire time.Time) {
-			c.JSON(http.StatusOK, gin.H{
+		mw.LoginResponse = func(c *gin.Context, code int, token string, expire time.Time) (gin.H, error) {
+			return gin.H{
 				"code":   http.StatusOK,
 				"token":  token,
 				"expire": expire.Format(time.RFC3339),
-			})
+			}, nil
 		}
 	}
 
@@ -371,12 +373,12 @@ func (mw *GinJWTMiddleware) MiddlewareInit() error {
 	}
 
 	if mw.RefreshResponse == nil {
-		mw.RefreshResponse = func(c *gin.Context, code int, token string, expire time.Time) {
-			c.JSON(http.StatusOK, gin.H{
+		mw.RefreshResponse = func(c *gin.Context, code int, token string, expire time.Time) (gin.H, error) {
+			return gin.H{
 				"code":   http.StatusOK,
 				"token":  token,
 				"expire": expire.Format(time.RFC3339),
-			})
+			}, nil
 		}
 	}
 
@@ -430,13 +432,13 @@ func (mw *GinJWTMiddleware) MiddlewareInit() error {
 }
 
 // MiddlewareFunc makes GinJWTMiddleware implement the Middleware interface.
-func (mw *GinJWTMiddleware) MiddlewareFunc() gin.HandlerFunc {
+func (mw *GinJWTMiddleware[K]) MiddlewareFunc() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		mw.middlewareImpl(c)
 	}
 }
 
-func (mw *GinJWTMiddleware) middlewareImpl(c *gin.Context) {
+func (mw *GinJWTMiddleware[K]) middlewareImpl(c *gin.Context) {
 	claims, err := mw.GetClaimsFromJWT(c)
 	if err != nil {
 		mw.unauthorized(c, http.StatusUnauthorized, mw.HTTPStatusMessageFunc(err, c))
@@ -483,7 +485,7 @@ func (mw *GinJWTMiddleware) middlewareImpl(c *gin.Context) {
 }
 
 // GetClaimsFromJWT get claims from JWT token
-func (mw *GinJWTMiddleware) GetClaimsFromJWT(c *gin.Context) (jwt.MapClaims, error) {
+func (mw *GinJWTMiddleware[K]) GetClaimsFromJWT(c *gin.Context) (jwt.MapClaims, error) {
 	token, err := mw.ParseToken(c)
 	if err != nil {
 		return nil, err
@@ -503,19 +505,27 @@ func (mw *GinJWTMiddleware) GetClaimsFromJWT(c *gin.Context) (jwt.MapClaims, err
 	return claims, nil
 }
 
+type LoginRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+type AuthResponse struct {
+	Message string `json:"message"`
+}
+
 // LoginHandler can be used by clients to get a jwt token.
 // Payload needs to be json in the form of {"username": "USERNAME", "password": "PASSWORD"}.
 // Reply will be of the form {"token": "TOKEN"}.
-func (mw *GinJWTMiddleware) LoginHandler(c *gin.Context) {
+func (mw *GinJWTMiddleware[K]) LoginHandler(c *gin.Context, req K) (gin.H, error) {
+
 	if mw.Authenticator == nil {
-		mw.unauthorized(c, http.StatusInternalServerError, mw.HTTPStatusMessageFunc(ErrMissingAuthenticatorFunc, c))
-		return
+		return nil, errors.New(ErrMissingAuthenticatorFunc.Error())
 	}
 
-	data, err := mw.Authenticator(c)
+	data, err := mw.Authenticator(c, req)
 	if err != nil {
-		mw.unauthorized(c, http.StatusUnauthorized, mw.HTTPStatusMessageFunc(err, c))
-		return
+		return nil, jujuErr.NewUnauthorized(nil, err.Error())
 	}
 
 	// Create the token
@@ -533,17 +543,47 @@ func (mw *GinJWTMiddleware) LoginHandler(c *gin.Context) {
 	claims["orig_iat"] = mw.TimeFunc().Unix()
 	tokenString, err := mw.signedString(token)
 	if err != nil {
-		mw.unauthorized(c, http.StatusUnauthorized, mw.HTTPStatusMessageFunc(ErrFailedTokenCreation, c))
-		return
+		return nil, jujuErr.NewUnauthorized(nil, err.Error())
 	}
 
 	mw.SetCookie(c, tokenString)
+	c.Header("token", tokenString)
+	c.Header("expire", expire.Format(time.RFC3339))
 
-	mw.LoginResponse(c, http.StatusOK, tokenString, expire)
+	return mw.LoginResponse(c, http.StatusOK, tokenString, expire)
+}
+
+type AuthError struct {
+	Message string `json:"message"`
+}
+
+func ErrHook(c *gin.Context, e error) (int, interface{}) {
+
+	errcode, errpl := 500, e.Error()
+	if _, ok := e.(tonic.BindError); ok {
+		errcode, errpl = 401, ErrMissingLoginValues.Error()
+	} else {
+		switch {
+		case jujuErr.Is(e, jujuErr.BadRequest) || jujuErr.Is(e, jujuErr.NotValid) || jujuErr.Is(e, jujuErr.AlreadyExists) || jujuErr.Is(e, jujuErr.NotSupported) || jujuErr.Is(e, jujuErr.NotAssigned) || jujuErr.Is(e, jujuErr.NotProvisioned):
+			errcode, errpl = 400, e.Error()
+		case jujuErr.Is(e, jujuErr.Forbidden):
+			errcode, errpl = 403, e.Error()
+		case jujuErr.Is(e, jujuErr.MethodNotAllowed):
+			errcode, errpl = 405, e.Error()
+		case jujuErr.Is(e, jujuErr.NotFound) || jujuErr.Is(e, jujuErr.UserNotFound):
+			errcode, errpl = 404, e.Error()
+		case jujuErr.Is(e, jujuErr.Unauthorized):
+			errcode, errpl = 401, e.Error()
+		case jujuErr.Is(e, jujuErr.NotImplemented):
+			errcode, errpl = 501, e.Error()
+		}
+	}
+
+	return errcode, gin.H{"message": errpl}
 }
 
 // LogoutHandler can be used by clients to remove the jwt cookie (if set)
-func (mw *GinJWTMiddleware) LogoutHandler(c *gin.Context) {
+func (mw *GinJWTMiddleware[K]) LogoutHandler(c *gin.Context) (*AuthResponse, error) {
 	// delete auth cookie
 	if mw.SendCookie {
 		if mw.CookieSameSite != 0 {
@@ -561,10 +601,12 @@ func (mw *GinJWTMiddleware) LogoutHandler(c *gin.Context) {
 		)
 	}
 
-	mw.LogoutResponse(c, http.StatusOK)
+	return &AuthResponse{
+		Message: "OK",
+	}, nil
 }
 
-func (mw *GinJWTMiddleware) signedString(token *jwt.Token) (string, error) {
+func (mw *GinJWTMiddleware[K]) signedString(token *jwt.Token) (string, error) {
 	var tokenString string
 	var err error
 	if mw.usingPublicKeyAlgo() {
@@ -578,18 +620,20 @@ func (mw *GinJWTMiddleware) signedString(token *jwt.Token) (string, error) {
 // RefreshHandler can be used to refresh a token. The token still needs to be valid on refresh.
 // Shall be put under an endpoint that is using the GinJWTMiddleware.
 // Reply will be of the form {"token": "TOKEN"}.
-func (mw *GinJWTMiddleware) RefreshHandler(c *gin.Context) {
+func (mw *GinJWTMiddleware[K]) RefreshHandler(c *gin.Context) (gin.H, error) {
 	tokenString, expire, err := mw.RefreshToken(c)
 	if err != nil {
-		mw.unauthorized(c, http.StatusUnauthorized, mw.HTTPStatusMessageFunc(err, c))
-		return
+		return nil, jujuErr.NewUnauthorized(err, err.Error())
 	}
 
-	mw.RefreshResponse(c, http.StatusOK, tokenString, expire)
+	c.Header("token", tokenString)
+	c.Header("expire", expire.Format(time.RFC3339))
+
+	return mw.RefreshResponse(c, http.StatusOK, tokenString, expire)
 }
 
 // RefreshToken refresh token and check if token is expired
-func (mw *GinJWTMiddleware) RefreshToken(c *gin.Context) (string, time.Time, error) {
+func (mw *GinJWTMiddleware[K]) RefreshToken(c *gin.Context) (string, time.Time, error) {
 	claims, err := mw.CheckIfTokenExpire(c)
 	if err != nil {
 		return "", time.Now(), err
@@ -617,7 +661,7 @@ func (mw *GinJWTMiddleware) RefreshToken(c *gin.Context) (string, time.Time, err
 }
 
 // CheckIfTokenExpire check if token expire
-func (mw *GinJWTMiddleware) CheckIfTokenExpire(c *gin.Context) (jwt.MapClaims, error) {
+func (mw *GinJWTMiddleware[K]) CheckIfTokenExpire(c *gin.Context) (jwt.MapClaims, error) {
 	token, err := mw.ParseToken(c)
 	if err != nil {
 		// If we receive an error, and the error is anything other than a single
@@ -643,7 +687,7 @@ func (mw *GinJWTMiddleware) CheckIfTokenExpire(c *gin.Context) (jwt.MapClaims, e
 }
 
 // TokenGenerator method that clients can use to get a jwt token.
-func (mw *GinJWTMiddleware) TokenGenerator(data interface{}) (string, time.Time, error) {
+func (mw *GinJWTMiddleware[K]) TokenGenerator(data interface{}) (string, time.Time, error) {
 	token := jwt.New(jwt.GetSigningMethod(mw.SigningAlgorithm))
 	claims := token.Claims.(jwt.MapClaims)
 
@@ -664,7 +708,7 @@ func (mw *GinJWTMiddleware) TokenGenerator(data interface{}) (string, time.Time,
 	return tokenString, expire, nil
 }
 
-func (mw *GinJWTMiddleware) jwtFromHeader(c *gin.Context, key string) (string, error) {
+func (mw *GinJWTMiddleware[K]) jwtFromHeader(c *gin.Context, key string) (string, error) {
 	authHeader := c.Request.Header.Get(key)
 
 	if authHeader == "" {
@@ -679,7 +723,7 @@ func (mw *GinJWTMiddleware) jwtFromHeader(c *gin.Context, key string) (string, e
 	return parts[1], nil
 }
 
-func (mw *GinJWTMiddleware) jwtFromQuery(c *gin.Context, key string) (string, error) {
+func (mw *GinJWTMiddleware[K]) jwtFromQuery(c *gin.Context, key string) (string, error) {
 	token := c.Query(key)
 
 	if token == "" {
@@ -689,7 +733,7 @@ func (mw *GinJWTMiddleware) jwtFromQuery(c *gin.Context, key string) (string, er
 	return token, nil
 }
 
-func (mw *GinJWTMiddleware) jwtFromCookie(c *gin.Context, key string) (string, error) {
+func (mw *GinJWTMiddleware[K]) jwtFromCookie(c *gin.Context, key string) (string, error) {
 	cookie, _ := c.Cookie(key)
 
 	if cookie == "" {
@@ -699,7 +743,7 @@ func (mw *GinJWTMiddleware) jwtFromCookie(c *gin.Context, key string) (string, e
 	return cookie, nil
 }
 
-func (mw *GinJWTMiddleware) jwtFromParam(c *gin.Context, key string) (string, error) {
+func (mw *GinJWTMiddleware[K]) jwtFromParam(c *gin.Context, key string) (string, error) {
 	token := c.Param(key)
 
 	if token == "" {
@@ -709,7 +753,7 @@ func (mw *GinJWTMiddleware) jwtFromParam(c *gin.Context, key string) (string, er
 	return token, nil
 }
 
-func (mw *GinJWTMiddleware) jwtFromForm(c *gin.Context, key string) (string, error) {
+func (mw *GinJWTMiddleware[K]) jwtFromForm(c *gin.Context, key string) (string, error) {
 	token := c.PostForm(key)
 
 	if token == "" {
@@ -720,7 +764,7 @@ func (mw *GinJWTMiddleware) jwtFromForm(c *gin.Context, key string) (string, err
 }
 
 // ParseToken parse jwt token from gin context
-func (mw *GinJWTMiddleware) ParseToken(c *gin.Context) (*jwt.Token, error) {
+func (mw *GinJWTMiddleware[K]) ParseToken(c *gin.Context) (*jwt.Token, error) {
 	var token string
 	var err error
 
@@ -770,7 +814,7 @@ func (mw *GinJWTMiddleware) ParseToken(c *gin.Context) (*jwt.Token, error) {
 }
 
 // ParseTokenString parse jwt token string
-func (mw *GinJWTMiddleware) ParseTokenString(token string) (*jwt.Token, error) {
+func (mw *GinJWTMiddleware[K]) ParseTokenString(token string) (*jwt.Token, error) {
 	if mw.KeyFunc != nil {
 		return jwt.Parse(token, mw.KeyFunc, mw.ParseOptions...)
 	}
@@ -787,7 +831,7 @@ func (mw *GinJWTMiddleware) ParseTokenString(token string) (*jwt.Token, error) {
 	}, mw.ParseOptions...)
 }
 
-func (mw *GinJWTMiddleware) unauthorized(c *gin.Context, code int, message string) {
+func (mw *GinJWTMiddleware[K]) unauthorized(c *gin.Context, code int, message string) {
 	c.Header("WWW-Authenticate", "JWT realm="+mw.Realm)
 	if !mw.DisabledAbort {
 		c.Abort()
@@ -831,7 +875,7 @@ func GetToken(c *gin.Context) string {
 }
 
 // SetCookie help to set the token in the cookie
-func (mw *GinJWTMiddleware) SetCookie(c *gin.Context, token string) {
+func (mw *GinJWTMiddleware[K]) SetCookie(c *gin.Context, token string) {
 	// set cookie
 	if mw.SendCookie {
 		expireCookie := mw.TimeFunc().Add(mw.CookieMaxAge)

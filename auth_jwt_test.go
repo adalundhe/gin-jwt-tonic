@@ -15,6 +15,7 @@ import (
 	"github.com/appleboy/gofight/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v4"
+	"github.com/loopfz/gadgeto/tonic"
 	"github.com/stretchr/testify/assert"
 	"github.com/tidwall/gjson"
 )
@@ -27,7 +28,7 @@ type Login struct {
 
 var (
 	key                  = []byte("secret key")
-	defaultAuthenticator = func(c *gin.Context) (interface{}, error) {
+	defaultAuthenticator = func(c *gin.Context, user *Login) (interface{}, error) {
 		var loginVals Login
 		userID := loginVals.Username
 		password := loginVals.Password
@@ -71,7 +72,7 @@ func keyFunc(token *jwt.Token) (interface{}, error) {
 }
 
 func TestMissingKey(t *testing.T) {
-	_, err := New(&GinJWTMiddleware{
+	_, err := New(&GinJWTMiddleware[*Login]{
 		Realm:         "test zone",
 		Timeout:       time.Hour,
 		MaxRefresh:    time.Hour * 24,
@@ -83,7 +84,7 @@ func TestMissingKey(t *testing.T) {
 }
 
 func TestMissingPrivKey(t *testing.T) {
-	_, err := New(&GinJWTMiddleware{
+	_, err := New(&GinJWTMiddleware[*Login]{
 		Realm:            "zone",
 		SigningAlgorithm: "RS256",
 		PrivKeyFile:      "nonexisting",
@@ -94,7 +95,7 @@ func TestMissingPrivKey(t *testing.T) {
 }
 
 func TestMissingPubKey(t *testing.T) {
-	_, err := New(&GinJWTMiddleware{
+	_, err := New(&GinJWTMiddleware[*Login]{
 		Realm:            "zone",
 		SigningAlgorithm: "RS256",
 		PrivKeyFile:      "testdata/jwtRS256.key",
@@ -106,7 +107,7 @@ func TestMissingPubKey(t *testing.T) {
 }
 
 func TestInvalidPrivKey(t *testing.T) {
-	_, err := New(&GinJWTMiddleware{
+	_, err := New(&GinJWTMiddleware[*Login]{
 		Realm:            "zone",
 		SigningAlgorithm: "RS256",
 		PrivKeyFile:      "testdata/invalidprivkey.key",
@@ -118,7 +119,7 @@ func TestInvalidPrivKey(t *testing.T) {
 }
 
 func TestInvalidPrivKeyBytes(t *testing.T) {
-	_, err := New(&GinJWTMiddleware{
+	_, err := New(&GinJWTMiddleware[*Login]{
 		Realm:            "zone",
 		SigningAlgorithm: "RS256",
 		PrivKeyBytes:     []byte("Invalid_Private_Key"),
@@ -130,7 +131,7 @@ func TestInvalidPrivKeyBytes(t *testing.T) {
 }
 
 func TestInvalidPubKey(t *testing.T) {
-	_, err := New(&GinJWTMiddleware{
+	_, err := New(&GinJWTMiddleware[*Login]{
 		Realm:            "zone",
 		SigningAlgorithm: "RS256",
 		PrivKeyFile:      "testdata/jwtRS256.key",
@@ -142,7 +143,7 @@ func TestInvalidPubKey(t *testing.T) {
 }
 
 func TestInvalidPubKeyBytes(t *testing.T) {
-	_, err := New(&GinJWTMiddleware{
+	_, err := New(&GinJWTMiddleware[*Login]{
 		Realm:            "zone",
 		SigningAlgorithm: "RS256",
 		PrivKeyFile:      "testdata/jwtRS256.key",
@@ -154,7 +155,7 @@ func TestInvalidPubKeyBytes(t *testing.T) {
 }
 
 func TestMissingTimeOut(t *testing.T) {
-	authMiddleware, err := New(&GinJWTMiddleware{
+	authMiddleware, err := New(&GinJWTMiddleware[*Login]{
 		Realm:         "test zone",
 		Key:           key,
 		Authenticator: defaultAuthenticator,
@@ -165,7 +166,7 @@ func TestMissingTimeOut(t *testing.T) {
 }
 
 func TestMissingTokenLookup(t *testing.T) {
-	authMiddleware, err := New(&GinJWTMiddleware{
+	authMiddleware, err := New(&GinJWTMiddleware[*Login]{
 		Realm:         "test zone",
 		Key:           key,
 		Authenticator: defaultAuthenticator,
@@ -182,18 +183,19 @@ func helloHandler(c *gin.Context) {
 	})
 }
 
-func ginHandler(auth *GinJWTMiddleware) *gin.Engine {
+func ginHandler(auth *GinJWTMiddleware[*Login]) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 
-	r.POST("/login", auth.LoginHandler)
-	r.POST("/logout", auth.LogoutHandler)
+	tonic.SetErrorHook(ErrHook)
+	r.POST("/login", tonic.Handler(auth.LoginHandler, 200))
+	r.POST("/logout", tonic.Handler(auth.LogoutHandler, 200))
 	// test token in path
-	r.GET("/g/:token/refresh_token", auth.RefreshHandler)
+	r.GET("/g/:token/refresh_token", tonic.Handler(auth.RefreshHandler, 200))
 
 	group := r.Group("/auth")
 	// Refresh time can be longer than token timeout
-	group.GET("/refresh_token", auth.RefreshHandler)
+	group.GET("/refresh_token", tonic.Handler(auth.RefreshHandler, 200))
 	group.Use(auth.MiddlewareFunc())
 	{
 		group.GET("/hello", helloHandler)
@@ -203,7 +205,7 @@ func ginHandler(auth *GinJWTMiddleware) *gin.Engine {
 }
 
 func TestMissingAuthenticatorForLoginHandler(t *testing.T) {
-	authMiddleware, err := New(&GinJWTMiddleware{
+	authMiddleware, err := New(&GinJWTMiddleware[*Login]{
 		Realm:      "test zone",
 		Key:        key,
 		Timeout:    time.Hour,
@@ -232,41 +234,36 @@ func TestLoginHandler(t *testing.T) {
 	// the middleware to test
 	cookieName := "jwt"
 	cookieDomain := "example.com"
-	authMiddleware, err := New(&GinJWTMiddleware{
+	authMiddleware, err := New(&GinJWTMiddleware[*Login]{
 		Realm: "test zone",
 		Key:   key,
 		PayloadFunc: func(data interface{}) jwt.MapClaims {
 			// Set custom claim, to be checked in Authorizator method
 			return jwt.MapClaims{"testkey": "testval", "exp": 0}
 		},
-		Authenticator: func(c *gin.Context) (interface{}, error) {
-			var loginVals Login
-			if binderr := c.ShouldBind(&loginVals); binderr != nil {
-				return "", ErrMissingLoginValues
-			}
-			userID := loginVals.Username
-			password := loginVals.Password
-			if userID == "admin" && password == "admin" {
-				return userID, nil
+		Authenticator: func(c *gin.Context, user *Login) (interface{}, error) {
+
+			if user.Username == "admin" && user.Password == "admin" {
+				return user.Username, nil
 			}
 			return "", ErrFailedAuthentication
 		},
 		Authorizator: func(user interface{}, c *gin.Context) bool {
 			return true
 		},
-		LoginResponse: func(c *gin.Context, code int, token string, t time.Time) {
+		LoginResponse: func(c *gin.Context, code int, token string, t time.Time) (gin.H, error) {
 			cookie, err := c.Cookie("jwt")
 			if err != nil {
 				log.Println(err)
 			}
 
-			c.JSON(http.StatusOK, gin.H{
+			return gin.H{
 				"code":    http.StatusOK,
 				"token":   token,
 				"expire":  t.Format(time.RFC3339),
 				"message": "login successfully",
 				"cookie":  cookie,
-			})
+			}, nil
 		},
 		SendCookie:   true,
 		CookieName:   cookieName,
@@ -322,7 +319,7 @@ func TestLoginHandler(t *testing.T) {
 
 func TestParseToken(t *testing.T) {
 	// the middleware to test
-	authMiddleware, _ := New(&GinJWTMiddleware{
+	authMiddleware, _ := New(&GinJWTMiddleware[*Login]{
 		Realm:         "test zone",
 		Key:           key,
 		Timeout:       time.Hour,
@@ -369,7 +366,7 @@ func TestParseToken(t *testing.T) {
 
 func TestParseTokenRS256(t *testing.T) {
 	// the middleware to test
-	authMiddleware, _ := New(&GinJWTMiddleware{
+	authMiddleware, _ := New(&GinJWTMiddleware[*Login]{
 		Realm:            "test zone",
 		Key:              key,
 		Timeout:          time.Hour,
@@ -419,7 +416,7 @@ func TestParseTokenRS256(t *testing.T) {
 
 func TestParseTokenKeyFunc(t *testing.T) {
 	// the middleware to test
-	authMiddleware, _ := New(&GinJWTMiddleware{
+	authMiddleware, _ := New(&GinJWTMiddleware[*Login]{
 		Realm:         "test zone",
 		KeyFunc:       keyFunc,
 		Timeout:       time.Hour,
@@ -471,7 +468,7 @@ func TestParseTokenKeyFunc(t *testing.T) {
 
 func TestRefreshHandlerRS256(t *testing.T) {
 	// the middleware to test
-	authMiddleware, _ := New(&GinJWTMiddleware{
+	authMiddleware, _ := New(&GinJWTMiddleware[*Login]{
 		Realm:            "test zone",
 		Key:              key,
 		Timeout:          time.Hour,
@@ -482,19 +479,19 @@ func TestRefreshHandlerRS256(t *testing.T) {
 		SendCookie:       true,
 		CookieName:       "jwt",
 		Authenticator:    defaultAuthenticator,
-		RefreshResponse: func(c *gin.Context, code int, token string, t time.Time) {
+		RefreshResponse: func(c *gin.Context, code int, token string, t time.Time) (gin.H, error) {
 			cookie, err := c.Cookie("jwt")
 			if err != nil {
-				log.Println(err)
+				return nil, err
 			}
 
-			c.JSON(http.StatusOK, gin.H{
+			return gin.H{
 				"code":    http.StatusOK,
 				"token":   token,
 				"expire":  t.Format(time.RFC3339),
 				"message": "refresh successfully",
 				"cookie":  cookie,
-			})
+			}, nil
 		},
 	})
 
@@ -535,7 +532,7 @@ func TestRefreshHandlerRS256(t *testing.T) {
 
 func TestRefreshHandler(t *testing.T) {
 	// the middleware to test
-	authMiddleware, _ := New(&GinJWTMiddleware{
+	authMiddleware, _ := New(&GinJWTMiddleware[*Login]{
 		Realm:         "test zone",
 		Key:           key,
 		Timeout:       time.Hour,
@@ -574,7 +571,7 @@ func TestRefreshHandler(t *testing.T) {
 
 func TestExpiredTokenWithinMaxRefreshOnRefreshHandler(t *testing.T) {
 	// the middleware to test
-	authMiddleware, _ := New(&GinJWTMiddleware{
+	authMiddleware, _ := New(&GinJWTMiddleware[*Login]{
 		Realm:         "test zone",
 		Key:           key,
 		Timeout:       time.Hour,
@@ -605,7 +602,7 @@ func TestExpiredTokenWithinMaxRefreshOnRefreshHandler(t *testing.T) {
 
 func TestExpiredTokenOnRefreshHandler(t *testing.T) {
 	// the middleware to test
-	authMiddleware, _ := New(&GinJWTMiddleware{
+	authMiddleware, _ := New(&GinJWTMiddleware[*Login]{
 		Realm:         "test zone",
 		Key:           key,
 		Timeout:       time.Hour,
@@ -634,7 +631,7 @@ func TestExpiredTokenOnRefreshHandler(t *testing.T) {
 
 func TestAuthorizator(t *testing.T) {
 	// the middleware to test
-	authMiddleware, _ := New(&GinJWTMiddleware{
+	authMiddleware, _ := New(&GinJWTMiddleware[*Login]{
 		Realm:         "test zone",
 		Key:           key,
 		Timeout:       time.Hour,
@@ -667,7 +664,7 @@ func TestAuthorizator(t *testing.T) {
 }
 
 func TestParseTokenWithJsonNumber(t *testing.T) {
-	authMiddleware, _ := New(&GinJWTMiddleware{
+	authMiddleware, _ := New(&GinJWTMiddleware[*Login]{
 		Realm:         "test zone",
 		Key:           key,
 		Timeout:       time.Hour,
@@ -694,7 +691,7 @@ func TestParseTokenWithJsonNumber(t *testing.T) {
 
 func TestClaimsDuringAuthorization(t *testing.T) {
 	// the middleware to test
-	authMiddleware, _ := New(&GinJWTMiddleware{
+	authMiddleware, _ := New(&GinJWTMiddleware[*Login]{
 		Realm:      "test zone",
 		Key:        key,
 		Timeout:    time.Hour,
@@ -720,22 +717,14 @@ func TestClaimsDuringAuthorization(t *testing.T) {
 			// Set custom claim, to be checked in Authorizator method
 			return jwt.MapClaims{"identity": data.(string), "testkey": testkey, "exp": 0}
 		},
-		Authenticator: func(c *gin.Context) (interface{}, error) {
-			var loginVals Login
+		Authenticator: func(c *gin.Context, user *Login) (interface{}, error) {
 
-			if err := c.BindJSON(&loginVals); err != nil {
-				return "", ErrMissingLoginValues
+			if user.Username == "admin" && user.Password == "admin" {
+				return user.Username, nil
 			}
 
-			userID := loginVals.Username
-			password := loginVals.Password
-
-			if userID == "admin" && password == "admin" {
-				return userID, nil
-			}
-
-			if userID == "test" && password == "test" {
-				return userID, nil
+			if user.Username == "test" && user.Password == "test" {
+				return user.Username, nil
 			}
 
 			return "Guest", ErrFailedAuthentication
@@ -821,12 +810,12 @@ func TestEmptyClaims(t *testing.T) {
 	var jwtClaims jwt.MapClaims
 
 	// the middleware to test
-	authMiddleware, _ := New(&GinJWTMiddleware{
+	authMiddleware, _ := New(&GinJWTMiddleware[*Login]{
 		Realm:      "test zone",
 		Key:        key,
 		Timeout:    time.Hour,
 		MaxRefresh: time.Hour * 24,
-		Authenticator: func(c *gin.Context) (interface{}, error) {
+		Authenticator: func(c *gin.Context, user *Login) (interface{}, error) {
 			var loginVals Login
 			userID := loginVals.Username
 			password := loginVals.Password
@@ -864,7 +853,7 @@ func TestEmptyClaims(t *testing.T) {
 
 func TestUnauthorized(t *testing.T) {
 	// the middleware to test
-	authMiddleware, _ := New(&GinJWTMiddleware{
+	authMiddleware, _ := New(&GinJWTMiddleware[*Login]{
 		Realm:         "test zone",
 		Key:           key,
 		Timeout:       time.Hour,
@@ -890,7 +879,7 @@ func TestUnauthorized(t *testing.T) {
 
 func TestTokenExpire(t *testing.T) {
 	// the middleware to test
-	authMiddleware, _ := New(&GinJWTMiddleware{
+	authMiddleware, _ := New(&GinJWTMiddleware[*Login]{
 		Realm:         "test zone",
 		Key:           key,
 		Timeout:       time.Hour,
@@ -920,7 +909,7 @@ func TestTokenExpire(t *testing.T) {
 
 func TestTokenFromQueryString(t *testing.T) {
 	// the middleware to test
-	authMiddleware, _ := New(&GinJWTMiddleware{
+	authMiddleware, _ := New(&GinJWTMiddleware[*Login]{
 		Realm:         "test zone",
 		Key:           key,
 		Timeout:       time.Hour,
@@ -958,7 +947,7 @@ func TestTokenFromQueryString(t *testing.T) {
 
 func TestTokenFromParamPath(t *testing.T) {
 	// the middleware to test
-	authMiddleware, _ := New(&GinJWTMiddleware{
+	authMiddleware, _ := New(&GinJWTMiddleware[*Login]{
 		Realm:         "test zone",
 		Key:           key,
 		Timeout:       time.Hour,
@@ -993,7 +982,7 @@ func TestTokenFromParamPath(t *testing.T) {
 
 func TestTokenFromCookieString(t *testing.T) {
 	// the middleware to test
-	authMiddleware, _ := New(&GinJWTMiddleware{
+	authMiddleware, _ := New(&GinJWTMiddleware[*Login]{
 		Realm:         "test zone",
 		Key:           key,
 		Timeout:       time.Hour,
@@ -1051,7 +1040,7 @@ func TestTokenFromCookieString(t *testing.T) {
 
 func TestDefineTokenHeadName(t *testing.T) {
 	// the middleware to test
-	authMiddleware, _ := New(&GinJWTMiddleware{
+	authMiddleware, _ := New(&GinJWTMiddleware[*Login]{
 		Realm:         "test zone",
 		Key:           key,
 		Timeout:       time.Hour,
@@ -1085,7 +1074,7 @@ func TestHTTPStatusMessageFunc(t *testing.T) {
 	failedError := errors.New("Failed test error")
 	successMessage := "Overwrite error message."
 
-	authMiddleware, _ := New(&GinJWTMiddleware{
+	authMiddleware, _ := New(&GinJWTMiddleware[*Login]{
 		Key:           key,
 		Timeout:       time.Hour,
 		MaxRefresh:    time.Hour * 24,
@@ -1109,7 +1098,7 @@ func TestHTTPStatusMessageFunc(t *testing.T) {
 
 func TestSendAuthorizationBool(t *testing.T) {
 	// the middleware to test
-	authMiddleware, _ := New(&GinJWTMiddleware{
+	authMiddleware, _ := New(&GinJWTMiddleware[*Login]{
 		Realm:             "test zone",
 		Key:               key,
 		Timeout:           time.Hour,
@@ -1147,7 +1136,7 @@ func TestSendAuthorizationBool(t *testing.T) {
 
 func TestExpiredTokenOnAuth(t *testing.T) {
 	// the middleware to test
-	authMiddleware, _ := New(&GinJWTMiddleware{
+	authMiddleware, _ := New(&GinJWTMiddleware[*Login]{
 		Realm:             "test zone",
 		Key:               key,
 		Timeout:           time.Hour,
@@ -1177,7 +1166,7 @@ func TestExpiredTokenOnAuth(t *testing.T) {
 
 func TestBadTokenOnRefreshHandler(t *testing.T) {
 	// the middleware to test
-	authMiddleware, _ := New(&GinJWTMiddleware{
+	authMiddleware, _ := New(&GinJWTMiddleware[*Login]{
 		Realm:         "test zone",
 		Key:           key,
 		Timeout:       time.Hour,
@@ -1199,7 +1188,7 @@ func TestBadTokenOnRefreshHandler(t *testing.T) {
 
 func TestExpiredField(t *testing.T) {
 	// the middleware to test
-	authMiddleware, _ := New(&GinJWTMiddleware{
+	authMiddleware, _ := New(&GinJWTMiddleware[*Login]{
 		Realm:         "test zone",
 		Key:           key,
 		Timeout:       time.Hour,
@@ -1245,7 +1234,7 @@ func TestExpiredField(t *testing.T) {
 
 func TestCheckTokenString(t *testing.T) {
 	// the middleware to test
-	authMiddleware, _ := New(&GinJWTMiddleware{
+	authMiddleware, _ := New(&GinJWTMiddleware[*Login]{
 		Realm:         "test zone",
 		Key:           key,
 		Timeout:       1 * time.Second,
@@ -1302,7 +1291,7 @@ func TestLogout(t *testing.T) {
 	cookieName := "jwt"
 	cookieDomain := "example.com"
 	// the middleware to test
-	authMiddleware, _ := New(&GinJWTMiddleware{
+	authMiddleware, _ := New(&GinJWTMiddleware[*Login]{
 		Realm:         "test zone",
 		Key:           key,
 		Timeout:       time.Hour,
@@ -1328,7 +1317,7 @@ func TestSetCookie(t *testing.T) {
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 
-	mw, _ := New(&GinJWTMiddleware{
+	mw, _ := New(&GinJWTMiddleware[*Login]{
 		Realm:          "test zone",
 		Key:            key,
 		Timeout:        time.Hour,
