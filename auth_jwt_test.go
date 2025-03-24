@@ -90,7 +90,7 @@ func TestMissingPrivKey(t *testing.T) {
 	}, Signer{
 		Name: "test",
 		Keys: []Key{
-			Key{
+			{
 				PrivKeyFile: "nonexisting",
 			},
 		},
@@ -143,7 +143,7 @@ func TestInvalidPrivKeyBytes(t *testing.T) {
 	}, Signer{
 		Name: "test",
 		Keys: []Key{
-			Key{
+			{
 				Data:       "Invalid_Private_Key",
 				PubKeyFile: "testdata/jwtRS256.key.pub",
 			},
@@ -161,7 +161,7 @@ func TestInvalidPubKey(t *testing.T) {
 	}, Signer{
 		Name: "test",
 		Keys: []Key{
-			Key{
+			{
 				PrivKeyFile: "testdata/jwtRS256.key",
 				PubKeyFile:  "testdata/invalidpubkey.key",
 			},
@@ -473,7 +473,7 @@ func TestParseTokenKeyFunc(t *testing.T) {
 	}, Signer{
 		Name: "test",
 		Keys: []Key{
-			Key{
+			{
 				PrivKeyFile: "",
 				PubKeyFile:  "",
 			},
