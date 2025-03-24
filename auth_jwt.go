@@ -24,6 +24,11 @@ type AuthResponse struct {
 	Cookie  string `json:"cookie"`
 }
 
+type GeneratedToken struct {
+	Token  string
+	Expire time.Time
+}
+
 // GinJWTMiddleware provides a Json-Web-Token authentication implementation. On failure, a 401 HTTP response
 // is returned. On success, the wrapped middleware is called, and the userID is made available as
 // c.Get("userID").(string).
@@ -558,6 +563,19 @@ func (mw *GinJWTMiddleware[K]) LoginHandler(c *gin.Context, req K) (*AuthRespons
 	}
 
 	// Create the token
+	generated, err := mw.CreateToken(data)
+	if err != nil {
+		return nil, jujuErr.NewUnauthorized(nil, err.Error())
+	}
+
+	mw.SetCookie(c, generated.Token)
+	c.Header("token", generated.Token)
+	c.Header("expire", generated.Expire.Format(time.RFC3339))
+
+	return mw.LoginResponse(c, http.StatusOK, generated.Token, generated.Expire)
+}
+
+func (mw *GinJWTMiddleware[K]) CreateToken(data interface{}) (*GeneratedToken, error) {
 	token := jwt.New(jwt.GetSigningMethod(mw.SigningAlgorithm))
 	claims := token.Claims.(jwt.MapClaims)
 
@@ -572,14 +590,13 @@ func (mw *GinJWTMiddleware[K]) LoginHandler(c *gin.Context, req K) (*AuthRespons
 	claims["orig_iat"] = mw.TimeFunc().Unix()
 	tokenString, err := mw.signedString(token)
 	if err != nil {
-		return nil, jujuErr.NewUnauthorized(nil, err.Error())
+		return nil, err
 	}
 
-	mw.SetCookie(c, tokenString)
-	c.Header("token", tokenString)
-	c.Header("expire", expire.Format(time.RFC3339))
-
-	return mw.LoginResponse(c, http.StatusOK, tokenString, expire)
+	return &GeneratedToken{
+		Token:  tokenString,
+		Expire: expire,
+	}, err
 }
 
 type AuthError struct {
