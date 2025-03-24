@@ -651,6 +651,40 @@ func (mw *GinJWTMiddleware[K]) RefreshHandler(c *gin.Context) (*AuthResponse, er
 	return mw.RefreshResponse(c, http.StatusOK, tokenString, expire)
 }
 
+func (mw *GinJWTMiddleware[K]) RefreshTokenFromString(token string) (*GeneratedToken, error) {
+	claims, err := mw.CheckIfExpired(token)
+	if err != nil {
+		return &GeneratedToken{
+			Token:  "",
+			Expire: time.Now(),
+		}, err
+	}
+
+	// Create the token
+	newToken := jwt.New(jwt.GetSigningMethod(mw.SigningAlgorithm))
+	newClaims := newToken.Claims.(jwt.MapClaims)
+
+	for key := range claims {
+		newClaims[key] = claims[key]
+	}
+
+	expire := mw.TimeFunc().Add(mw.TimeoutFunc(claims))
+	newClaims[mw.ExpField] = expire.Unix()
+	newClaims["orig_iat"] = mw.TimeFunc().Unix()
+	tokenString, err := mw.signedString(newToken)
+	if err != nil {
+		return &GeneratedToken{
+			Token:  "",
+			Expire: time.Now(),
+		}, err
+	}
+
+	return &GeneratedToken{
+		Token:  tokenString,
+		Expire: expire,
+	}, nil
+}
+
 // RefreshToken refresh token and check if token is expired
 func (mw *GinJWTMiddleware[K]) RefreshToken(c *gin.Context) (string, time.Time, error) {
 	claims, err := mw.CheckIfTokenExpire(c)
@@ -682,6 +716,31 @@ func (mw *GinJWTMiddleware[K]) RefreshToken(c *gin.Context) (string, time.Time, 
 // CheckIfTokenExpire check if token expire
 func (mw *GinJWTMiddleware[K]) CheckIfTokenExpire(c *gin.Context) (jwt.MapClaims, error) {
 	token, err := mw.ParseToken(c)
+	if err != nil {
+		// If we receive an error, and the error is anything other than a single
+		// ValidationErrorExpired, we want to return the error.
+		// If the error is just ValidationErrorExpired, we want to continue, as we can still
+		// refresh the token if it's within the MaxRefresh time.
+		// (see https://github.com/appleboy/gin-jwt/issues/176)
+		validationErr, ok := err.(*jwt.ValidationError)
+		if !ok || validationErr.Errors != jwt.ValidationErrorExpired {
+			return nil, err
+		}
+	}
+
+	claims := token.Claims.(jwt.MapClaims)
+
+	origIat := int64(claims["orig_iat"].(float64))
+
+	if origIat < mw.TimeFunc().Add(-mw.MaxRefresh).Unix() {
+		return nil, ErrExpiredToken
+	}
+
+	return claims, nil
+}
+
+func (mw *GinJWTMiddleware[K]) CheckIfExpired(tokenString string) (jwt.MapClaims, error) {
+	token, err := mw.ParseTokenFromString(tokenString)
 	if err != nil {
 		// If we receive an error, and the error is anything other than a single
 		// ValidationErrorExpired, we want to return the error.
@@ -827,6 +886,25 @@ func (mw *GinJWTMiddleware[K]) ParseToken(c *gin.Context) (*jwt.Token, error) {
 
 		// save token string if valid
 		c.Set("JWT_TOKEN", token)
+
+		return mw.Key, nil
+	}, mw.ParseOptions...)
+}
+
+// ParseToken parse jwt token from string
+func (mw *GinJWTMiddleware[K]) ParseTokenFromString(token string) (*jwt.Token, error) {
+
+	if mw.KeyFunc != nil {
+		return jwt.Parse(token, mw.KeyFunc, mw.ParseOptions...)
+	}
+
+	return jwt.Parse(token, func(t *jwt.Token) (interface{}, error) {
+		if jwt.GetSigningMethod(mw.SigningAlgorithm) != t.Method {
+			return nil, ErrInvalidSigningAlgorithm
+		}
+		if mw.usingPublicKeyAlgo() {
+			return mw.pubKey, nil
+		}
 
 		return mw.Key, nil
 	}, mw.ParseOptions...)

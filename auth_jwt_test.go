@@ -1348,3 +1348,125 @@ func TestSetCookie(t *testing.T) {
 	assert.Equal(t, "example.com", cookie.Domain)
 	assert.Equal(t, true, cookie.HttpOnly)
 }
+
+func TestCreateToken(t *testing.T) {
+
+	cookieName := "jwt"
+	cookieDomain := "example.com"
+	authMiddleware, err := New(&GinJWTMiddleware[*Login]{
+		Realm: "test zone",
+		Key:   key,
+		PayloadFunc: func(data interface{}) jwt.MapClaims {
+			// Set custom claim, to be checked in Authorizator method
+			return jwt.MapClaims{"testkey": "testval", "exp": 0}
+		},
+		Authenticator: func(c *gin.Context, user *Login) (interface{}, error) {
+
+			if user.Username == "admin" && user.Password == "admin" {
+				return user.Username, nil
+			}
+			return "", ErrFailedAuthentication
+		},
+		Authorizator: func(user interface{}, c *gin.Context) bool {
+			return true
+		},
+		LoginResponse: func(c *gin.Context, code int, token string, t time.Time) (*AuthResponse, error) {
+			cookie, err := c.Cookie("jwt")
+			if err != nil {
+				log.Println(err)
+			}
+
+			return &AuthResponse{
+				Code:    http.StatusOK,
+				Token:   token,
+				Expire:  t.Format(time.RFC3339),
+				Message: "login successfully",
+				Cookie:  cookie,
+			}, nil
+		},
+		SendCookie:   true,
+		CookieName:   cookieName,
+		CookieDomain: cookieDomain,
+		TimeFunc:     func() time.Time { return time.Now().Add(time.Duration(5) * time.Minute) },
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mappedClaims := jwt.MapClaims{
+		"username": "admin",
+		"password": "12345",
+	}
+
+	t.Run("it creates a token given valid data", func(t *testing.T) {
+
+		generated, err := authMiddleware.CreateToken(mappedClaims)
+
+		assert.Nil(t, err)
+		assert.IsType(t, &GeneratedToken{}, generated)
+		assert.NotNil(t, generated.Token)
+		assert.IsType(t, time.Time{}, generated.Expire)
+
+	})
+
+	token := jwt.New(jwt.GetSigningMethod(authMiddleware.SigningAlgorithm))
+	claims := token.Claims.(jwt.MapClaims)
+
+	if authMiddleware.PayloadFunc != nil {
+		for key, value := range authMiddleware.PayloadFunc(mappedClaims) {
+			claims[key] = value
+		}
+	}
+
+	originalExpirationTime := time.Now().Unix()
+	claims[authMiddleware.ExpField] = originalExpirationTime
+	claims["orig_iat"] = authMiddleware.TimeFunc().Unix()
+	tokenString, err := authMiddleware.signedString(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("it refreshes a token given a valid token that has expired", func(t *testing.T) {
+
+		generated, err := authMiddleware.RefreshTokenFromString(tokenString)
+
+		assert.Nil(t, err)
+		assert.IsType(t, &GeneratedToken{}, generated)
+		assert.NotNil(t, generated.Token)
+		assert.IsType(t, time.Time{}, generated.Expire)
+		assert.Greater(t, generated.Expire.Unix(), originalExpirationTime)
+
+	})
+
+	token = jwt.New(jwt.GetSigningMethod(authMiddleware.SigningAlgorithm))
+	claims = token.Claims.(jwt.MapClaims)
+
+	if authMiddleware.PayloadFunc != nil {
+		for key, value := range authMiddleware.PayloadFunc(mappedClaims) {
+			claims[key] = value
+		}
+	}
+
+	originalExpirationTime = time.Now().Add(
+		time.Duration(time.Hour * 1),
+	).Unix()
+	claims[authMiddleware.ExpField] = originalExpirationTime
+	claims["orig_iat"] = authMiddleware.TimeFunc().Unix()
+	tokenString, err = authMiddleware.signedString(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("it refreshes a token given a valid token that has not yet expired", func(t *testing.T) {
+
+		generated, err := authMiddleware.RefreshTokenFromString(tokenString)
+
+		assert.Nil(t, err)
+		assert.IsType(t, &GeneratedToken{}, generated)
+		assert.NotNil(t, generated.Token)
+		assert.IsType(t, time.Time{}, generated.Expire)
+		assert.Greater(t, generated.Expire.Unix(), originalExpirationTime)
+
+	})
+}
