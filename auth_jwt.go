@@ -4,6 +4,7 @@ import (
 	"crypto/rsa"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"net/http"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/go-jose/go-jose/v4"
 	"github.com/golang-jwt/jwt/v4"
 	jujuErr "github.com/juju/errors"
 	"github.com/loopfz/gadgeto/tonic"
@@ -30,6 +32,10 @@ type GeneratedToken struct {
 	Expire time.Time
 }
 
+type Options struct {
+	SignerName string
+}
+
 // GinJWTMiddleware provides a Json-Web-Token authentication implementation. On failure, a 401 HTTP response
 // is returned. On success, the wrapped middleware is called, and the userID is made available as
 // c.Get("userID").(string).
@@ -39,13 +45,17 @@ type GinJWTMiddleware[K interface{}] struct {
 	// Realm name to display to the user. Required.
 	Realm string
 
+	DefaultOptions *Options
+
 	// signing algorithm - possible values are HS256, HS384, HS512, RS256, RS384 or RS512
 	// Optional, default is HS256.
 	SigningAlgorithm string
+	Signers          map[string]jose.Signer
+	VerifierKeys     map[string]interface{}
 
 	// Secret key used for signing. Required.
-	Key []byte
-
+	Key  []byte
+	Keys map[string]*Key
 	// Callback to retrieve key used for signing. Setting KeyFunc will bypass
 	// all other key settings
 	KeyFunc func(token *jwt.Token) (interface{}, error)
@@ -117,15 +127,15 @@ type GinJWTMiddleware[K interface{}] struct {
 	HTTPStatusMessageFunc func(e error, c *gin.Context) string
 
 	// Private key file for asymmetric algorithms
-	PrivKeyFile string
+	PrivKeyFile map[string]string
 
 	// Private Key bytes for asymmetric algorithms
 	//
 	// Note: PrivKeyFile takes precedence over PrivKeyBytes if both are set
-	PrivKeyBytes []byte
+	PrivKeyBytes map[string][]byte
 
 	// Public key file for asymmetric algorithms
-	PubKeyFile string
+	PubKeyFile map[string]string
 
 	// Private key passphrase
 	PrivateKeyPassphrase string
@@ -133,13 +143,13 @@ type GinJWTMiddleware[K interface{}] struct {
 	// Public key bytes for asymmetric algorithms.
 	//
 	// Note: PubKeyFile takes precedence over PubKeyBytes if both are set
-	PubKeyBytes []byte
+	PubKeyBytes map[string][]byte
 
 	// Private key
-	privKey *rsa.PrivateKey
+	privKey map[string]*rsa.PrivateKey
 
 	// Public key
-	pubKey *rsa.PublicKey
+	pubKey map[string]*rsa.PublicKey
 
 	// Optionally return the token as a cookie
 	SendCookie bool
@@ -237,82 +247,117 @@ var (
 	IdentityKey = "identity"
 )
 
+type Key struct {
+	Data                 string
+	PrivKeyFile          string
+	PubKeyFile           string
+	PrivateKeyPassphrase string
+	IsJWK                bool
+}
+
+type Signer struct {
+	Name string
+	Keys []Key
+}
+
 // New for check error with GinJWTMiddleware
-func New[K interface{}](m *GinJWTMiddleware[K]) (*GinJWTMiddleware[K], error) {
-	if err := m.MiddlewareInit(); err != nil {
+func New[K interface{}](m *GinJWTMiddleware[K], signers ...Signer) (*GinJWTMiddleware[K], error) {
+	if err := m.MiddlewareInit(signers...); err != nil {
 		return nil, err
 	}
 
 	return m, nil
 }
 
-func (mw *GinJWTMiddleware[K]) readKeys() error {
-	err := mw.privateKey()
+func (mw *GinJWTMiddleware[K]) readKey(
+	signerName string,
+	key Key,
+) error {
+	err := mw.readPrivateKey(signerName, key)
 	if err != nil {
 		return err
 	}
 
-	err = mw.publicKey()
+	err = mw.readPublicKey(signerName, key)
 	if err != nil {
 		return err
 	}
+
+	mw.Keys[signerName] = &key
+
 	return nil
 }
 
-func (mw *GinJWTMiddleware[K]) privateKey() error {
+func (mw *GinJWTMiddleware[K]) readPrivateKey(
+	signerName string,
+	key Key,
+) error {
 	var keyData []byte
 	var err error
-	if mw.PrivKeyFile == "" {
-		keyData = mw.PrivKeyBytes
+	if key.PrivKeyFile == "" {
+		keyData = []byte(key.Data)
 	} else {
 		var filecontent []byte
-		filecontent, err = os.ReadFile(mw.PrivKeyFile)
+		filecontent, err = os.ReadFile(key.PrivKeyFile)
 		if err != nil {
 			return ErrNoPrivKeyFile
 		}
 		keyData = filecontent
 	}
 
-	if mw.PrivateKeyPassphrase != "" {
-		var key interface{}
-		key, err = pkcs8.ParsePKCS8PrivateKey(keyData, []byte(mw.PrivateKeyPassphrase))
+	if key.PrivateKeyPassphrase != "" {
+		var parsed interface{}
+		parsed, err = pkcs8.ParsePKCS8PrivateKey(keyData, []byte(key.PrivateKeyPassphrase))
 		if err != nil {
 			return ErrInvalidPrivKey
 		}
-		rsaKey, ok := key.(*rsa.PrivateKey)
+		rsaKey, ok := parsed.(*rsa.PrivateKey)
 		if !ok {
 			return ErrInvalidPrivKey
 		}
-		mw.privKey = rsaKey
+		mw.privKey[signerName] = rsaKey
 		return nil
 	}
 
-	var key *rsa.PrivateKey
-	key, err = jwt.ParseRSAPrivateKeyFromPEM(keyData)
+	var parsed *rsa.PrivateKey
+	parsed, err = jwt.ParseRSAPrivateKeyFromPEM(keyData)
 	if err != nil {
 		return ErrInvalidPrivKey
 	}
-	mw.privKey = key
+	mw.privKey[signerName] = parsed
 	return nil
 }
 
-func (mw *GinJWTMiddleware[K]) publicKey() error {
+func (mw *GinJWTMiddleware[K]) readPublicKey(
+	signerName string,
+	key Key,
+) error {
 	var keyData []byte
-	if mw.PubKeyFile == "" {
-		keyData = mw.PubKeyBytes
+	var err error
+	if key.PubKeyFile == "" {
+		keyData = []byte(key.Data)
 	} else {
-		filecontent, err := os.ReadFile(mw.PubKeyFile)
-		if err != nil {
-			return ErrNoPubKeyFile
-		}
-		keyData = filecontent
+		keyData, err = os.ReadFile(key.PubKeyFile)
 	}
 
-	key, err := jwt.ParseRSAPublicKeyFromPEM(keyData)
+	if err != nil {
+		return ErrNoPubKeyFile
+	}
+
+	if key.IsJWK {
+		err = mw.readJWK(signerName, keyData)
+	}
+
+	if err != nil {
+		return err
+	}
+
+	pubKey, err := jwt.ParseRSAPublicKeyFromPEM(keyData)
 	if err != nil {
 		return ErrInvalidPubKey
 	}
-	mw.pubKey = key
+	mw.pubKey[signerName] = pubKey
+	mw.PubKeyBytes[signerName] = keyData
 	return nil
 }
 
@@ -325,7 +370,12 @@ func (mw *GinJWTMiddleware[K]) usingPublicKeyAlgo() bool {
 }
 
 // MiddlewareInit initialize jwt configs.
-func (mw *GinJWTMiddleware[K]) MiddlewareInit() error {
+func (mw *GinJWTMiddleware[K]) MiddlewareInit(signers ...Signer) error {
+
+	if mw.DefaultOptions == nil {
+		mw.DefaultOptions = &Options{}
+	}
+
 	if mw.TokenLookup == "" {
 		mw.TokenLookup = "header:Authorization"
 	}
@@ -436,8 +486,39 @@ func (mw *GinJWTMiddleware[K]) MiddlewareInit() error {
 		return nil
 	}
 
+	if mw.usingPublicKeyAlgo() && mw.Keys == nil {
+		mw.Keys = make(map[string]*Key)
+	}
+
+	if mw.usingPublicKeyAlgo() && mw.Signers == nil {
+		mw.Signers = make(map[string]jose.Signer)
+	}
+
+	if mw.usingPublicKeyAlgo() && mw.VerifierKeys == nil {
+		mw.VerifierKeys = make(map[string]interface{})
+	}
+
 	if mw.usingPublicKeyAlgo() {
-		return mw.readKeys()
+		mw.pubKey = make(map[string]*rsa.PublicKey)
+		mw.privKey = make(map[string]*rsa.PrivateKey)
+		mw.PubKeyBytes = make(map[string][]byte)
+		mw.PrivKeyBytes = make(map[string][]byte)
+
+		for _, signer := range signers {
+			if len(signer.Keys) == 0 {
+				continue
+			}
+			for _, key := range signer.Keys {
+
+				err := mw.readKey(signer.Name, key)
+				if err != nil {
+					return err
+				}
+
+			}
+		}
+
+		return nil
 	}
 
 	if mw.Key == nil {
@@ -447,15 +528,50 @@ func (mw *GinJWTMiddleware[K]) MiddlewareInit() error {
 	return nil
 }
 
+func (mw *GinJWTMiddleware[K]) readJWK(
+	signerName string,
+	keyData []byte,
+) error {
+	key := &jose.JSONWebKey{}
+	err := key.UnmarshalJSON(keyData)
+	if err != nil {
+		return err
+	}
+	if key.IsPublic() {
+		if _, ok := mw.VerifierKeys[signerName]; ok {
+			return fmt.Errorf("multiple public keys for environment %s", signerName)
+		}
+
+		mw.VerifierKeys[signerName] = key
+
+	} else {
+		if _, ok := mw.Signers[signerName]; ok {
+			return fmt.Errorf("multiple private keys for environment %s", signerName)
+		}
+		newSigner, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.SignatureAlgorithm(key.Algorithm), Key: key.Key}, nil)
+		if err != nil {
+			return err
+		}
+		mw.Signers[signerName] = newSigner
+	}
+
+	return nil
+}
+
 // MiddlewareFunc makes GinJWTMiddleware implement the Middleware interface.
-func (mw *GinJWTMiddleware[K]) MiddlewareFunc() gin.HandlerFunc {
+func (mw *GinJWTMiddleware[K]) MiddlewareFunc(opts ...Options) gin.HandlerFunc {
+
+	if len(opts) > 0 {
+		mw.DefaultOptions = &opts[0]
+	}
+
 	return func(c *gin.Context) {
-		mw.middlewareImpl(c)
+		mw.middlewareImpl(c, mw.DefaultOptions)
 	}
 }
 
-func (mw *GinJWTMiddleware[K]) middlewareImpl(c *gin.Context) {
-	claims, err := mw.GetClaimsFromJWT(c)
+func (mw *GinJWTMiddleware[K]) middlewareImpl(c *gin.Context, opts *Options) {
+	claims, err := mw.GetClaimsFromJWT(c, opts)
 	if err != nil {
 		mw.unauthorized(c, http.StatusUnauthorized, mw.HTTPStatusMessageFunc(err, c))
 		return
@@ -501,8 +617,8 @@ func (mw *GinJWTMiddleware[K]) middlewareImpl(c *gin.Context) {
 }
 
 // GetClaimsFromJWT get claims from JWT token
-func (mw *GinJWTMiddleware[K]) GetClaimsFromJWT(c *gin.Context) (jwt.MapClaims, error) {
-	token, err := mw.ParseToken(c)
+func (mw *GinJWTMiddleware[K]) GetClaimsFromJWT(c *gin.Context, opts *Options) (jwt.MapClaims, error) {
+	token, err := mw.ParseToken(c, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -564,7 +680,7 @@ func (mw *GinJWTMiddleware[K]) LoginHandler(c *gin.Context, req K) (*AuthRespons
 	}
 
 	// Create the token
-	generated, err := mw.CreateToken(data)
+	generated, err := mw.CreateToken(data, mw.DefaultOptions)
 	if err != nil {
 		return nil, jujuErr.NewUnauthorized(nil, err.Error())
 	}
@@ -576,7 +692,7 @@ func (mw *GinJWTMiddleware[K]) LoginHandler(c *gin.Context, req K) (*AuthRespons
 	return mw.LoginResponse(c, http.StatusOK, generated.Token, generated.Expire)
 }
 
-func (mw *GinJWTMiddleware[K]) CreateToken(data interface{}) (*GeneratedToken, error) {
+func (mw *GinJWTMiddleware[K]) CreateToken(data interface{}, opts *Options) (*GeneratedToken, error) {
 	token := jwt.New(jwt.GetSigningMethod(mw.SigningAlgorithm))
 	claims := token.Claims.(jwt.MapClaims)
 
@@ -589,7 +705,7 @@ func (mw *GinJWTMiddleware[K]) CreateToken(data interface{}) (*GeneratedToken, e
 	expire := mw.TimeFunc().Add(mw.TimeoutFunc(claims))
 	claims[mw.ExpField] = expire.Unix()
 	claims["orig_iat"] = mw.TimeFunc().Unix()
-	tokenString, err := mw.signedString(token)
+	tokenString, err := mw.signedString(token, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -626,22 +742,49 @@ func (mw *GinJWTMiddleware[K]) LogoutHandler(c *gin.Context) (*AuthResponse, err
 	return mw.LogoutResponse(c, 200)
 }
 
-func (mw *GinJWTMiddleware[K]) signedString(token *jwt.Token) (string, error) {
-	var tokenString string
-	var err error
-	if mw.usingPublicKeyAlgo() {
-		tokenString, err = token.SignedString(mw.privKey)
-	} else {
-		tokenString, err = token.SignedString(mw.Key)
+func (mw *GinJWTMiddleware[K]) signedString(token *jwt.Token, opts *Options) (string, error) {
+
+	signerName := opts.SignerName
+	if signerName == "" || !mw.usingPublicKeyAlgo() {
+		return token.SignedString(mw.Key)
 	}
-	return tokenString, err
+
+	key, ok := mw.Keys[signerName]
+	if !ok {
+		return "", fmt.Errorf("key for signer %s not found", signerName)
+	}
+
+	if key.IsJWK {
+		return mw.signJWK(signerName)
+	}
+
+	return token.SignedString(mw.privKey[signerName])
+}
+
+func (mw *GinJWTMiddleware[K]) signJWK(signerName string) (string, error) {
+
+	payload := mw.PubKeyBytes[signerName]
+
+	signer, ok := mw.Signers[signerName]
+	if !ok {
+		return "", fmt.Errorf("signer %s not found", signerName)
+	}
+	signedPayload, err := signer.Sign(payload)
+	if err != nil {
+		return "", err
+	}
+	serializedPayload, err := signedPayload.CompactSerialize()
+	if err != nil {
+		return "", err
+	}
+	return serializedPayload, nil
 }
 
 // RefreshHandler can be used to refresh a token. The token still needs to be valid on refresh.
 // Shall be put under an endpoint that is using the GinJWTMiddleware.
 // Reply will be of the form {"token": "TOKEN"}.
 func (mw *GinJWTMiddleware[K]) RefreshHandler(c *gin.Context) (*AuthResponse, error) {
-	tokenString, expire, err := mw.RefreshToken(c)
+	tokenString, expire, err := mw.RefreshToken(c, mw.DefaultOptions)
 	if err != nil {
 		return nil, jujuErr.NewUnauthorized(err, err.Error())
 	}
@@ -652,8 +795,8 @@ func (mw *GinJWTMiddleware[K]) RefreshHandler(c *gin.Context) (*AuthResponse, er
 	return mw.RefreshResponse(c, http.StatusOK, tokenString, expire)
 }
 
-func (mw *GinJWTMiddleware[K]) RefreshIfRequired(token string) (*GeneratedToken, error) {
-	claims, expired, err := mw.CheckIfExpired(token)
+func (mw *GinJWTMiddleware[K]) RefreshIfRequired(token string, opts *Options) (*GeneratedToken, error) {
+	claims, expired, err := mw.CheckIfExpired(token, opts)
 	if err != nil {
 		return &GeneratedToken{
 			Token:  "",
@@ -682,7 +825,7 @@ func (mw *GinJWTMiddleware[K]) RefreshIfRequired(token string) (*GeneratedToken,
 	expire := mw.TimeFunc().Add(mw.TimeoutFunc(claims))
 	newClaims[mw.ExpField] = expire.Unix()
 	newClaims["orig_iat"] = mw.TimeFunc().Unix()
-	tokenString, err := mw.signedString(newToken)
+	tokenString, err := mw.signedString(newToken, opts)
 	if err != nil {
 		return &GeneratedToken{
 			Token:  "",
@@ -697,8 +840,8 @@ func (mw *GinJWTMiddleware[K]) RefreshIfRequired(token string) (*GeneratedToken,
 }
 
 // RefreshToken refresh token and check if token is expired
-func (mw *GinJWTMiddleware[K]) RefreshToken(c *gin.Context) (string, time.Time, error) {
-	claims, err := mw.CheckIfTokenExpire(c)
+func (mw *GinJWTMiddleware[K]) RefreshToken(c *gin.Context, opts *Options) (string, time.Time, error) {
+	claims, err := mw.CheckIfTokenExpire(c, opts)
 	if err != nil {
 		return "", time.Now(), err
 	}
@@ -714,7 +857,8 @@ func (mw *GinJWTMiddleware[K]) RefreshToken(c *gin.Context) (string, time.Time, 
 	expire := mw.TimeFunc().Add(mw.TimeoutFunc(claims))
 	newClaims[mw.ExpField] = expire.Unix()
 	newClaims["orig_iat"] = mw.TimeFunc().Unix()
-	tokenString, err := mw.signedString(newToken)
+
+	tokenString, err := mw.signedString(newToken, opts)
 	if err != nil {
 		return "", time.Now(), err
 	}
@@ -725,8 +869,8 @@ func (mw *GinJWTMiddleware[K]) RefreshToken(c *gin.Context) (string, time.Time, 
 }
 
 // CheckIfTokenExpire check if token expire
-func (mw *GinJWTMiddleware[K]) CheckIfTokenExpire(c *gin.Context) (jwt.MapClaims, error) {
-	token, err := mw.ParseToken(c)
+func (mw *GinJWTMiddleware[K]) CheckIfTokenExpire(c *gin.Context, opts *Options) (jwt.MapClaims, error) {
+	token, err := mw.ParseToken(c, opts)
 	if err != nil {
 		// If we receive an error, and the error is anything other than a single
 		// ValidationErrorExpired, we want to return the error.
@@ -750,8 +894,8 @@ func (mw *GinJWTMiddleware[K]) CheckIfTokenExpire(c *gin.Context) (jwt.MapClaims
 	return claims, nil
 }
 
-func (mw *GinJWTMiddleware[K]) CheckIfExpired(tokenString string) (jwt.MapClaims, bool, error) {
-	token, err := mw.ParseTokenFromString(tokenString)
+func (mw *GinJWTMiddleware[K]) CheckIfExpired(tokenString string, opts *Options) (jwt.MapClaims, bool, error) {
+	token, err := mw.ParseTokenFromString(tokenString, opts)
 
 	expired := false
 	if err != nil {
@@ -780,7 +924,7 @@ func (mw *GinJWTMiddleware[K]) CheckIfExpired(tokenString string) (jwt.MapClaims
 }
 
 // TokenGenerator method that clients can use to get a jwt token.
-func (mw *GinJWTMiddleware[K]) TokenGenerator(data interface{}) (string, time.Time, error) {
+func (mw *GinJWTMiddleware[K]) TokenGenerator(data interface{}, opts *Options) (string, time.Time, error) {
 	token := jwt.New(jwt.GetSigningMethod(mw.SigningAlgorithm))
 	claims := token.Claims.(jwt.MapClaims)
 
@@ -793,7 +937,7 @@ func (mw *GinJWTMiddleware[K]) TokenGenerator(data interface{}) (string, time.Ti
 	expire := mw.TimeFunc().Add(mw.TimeoutFunc(claims))
 	claims[mw.ExpField] = expire.Unix()
 	claims["orig_iat"] = mw.TimeFunc().Unix()
-	tokenString, err := mw.signedString(token)
+	tokenString, err := mw.signedString(token, opts)
 	if err != nil {
 		return "", time.Time{}, err
 	}
@@ -857,7 +1001,7 @@ func (mw *GinJWTMiddleware[K]) jwtFromForm(c *gin.Context, key string) (string, 
 }
 
 // ParseToken parse jwt token from gin context
-func (mw *GinJWTMiddleware[K]) ParseToken(c *gin.Context) (*jwt.Token, error) {
+func (mw *GinJWTMiddleware[K]) ParseToken(c *gin.Context, opts *Options) (*jwt.Token, error) {
 	var token string
 	var err error
 
@@ -896,7 +1040,7 @@ func (mw *GinJWTMiddleware[K]) ParseToken(c *gin.Context) (*jwt.Token, error) {
 			return nil, ErrInvalidSigningAlgorithm
 		}
 		if mw.usingPublicKeyAlgo() {
-			return mw.pubKey, nil
+			return mw.pubKey[opts.SignerName], nil
 		}
 
 		// save token string if valid
@@ -907,7 +1051,7 @@ func (mw *GinJWTMiddleware[K]) ParseToken(c *gin.Context) (*jwt.Token, error) {
 }
 
 // ParseToken parse jwt token from string
-func (mw *GinJWTMiddleware[K]) ParseTokenFromString(token string) (*jwt.Token, error) {
+func (mw *GinJWTMiddleware[K]) ParseTokenFromString(token string, opts *Options) (*jwt.Token, error) {
 
 	if mw.KeyFunc != nil {
 		return jwt.Parse(token, mw.KeyFunc, mw.ParseOptions...)
@@ -917,16 +1061,32 @@ func (mw *GinJWTMiddleware[K]) ParseTokenFromString(token string) (*jwt.Token, e
 		if jwt.GetSigningMethod(mw.SigningAlgorithm) != t.Method {
 			return nil, ErrInvalidSigningAlgorithm
 		}
+
 		if mw.usingPublicKeyAlgo() {
-			return mw.pubKey, nil
+			return mw.pubKey[opts.SignerName], nil
 		}
 
 		return mw.Key, nil
 	}, mw.ParseOptions...)
 }
 
+func (mw *GinJWTMiddleware[K]) checkIfJWK(opts *Options) bool {
+	signerName := opts.SignerName
+	if signerName == "" {
+		return false
+	}
+
+	key, ok := mw.Keys[signerName]
+	if !ok {
+		return ok
+	}
+
+	return key.IsJWK
+
+}
+
 // ParseTokenString parse jwt token string
-func (mw *GinJWTMiddleware[K]) ParseTokenString(token string) (*jwt.Token, error) {
+func (mw *GinJWTMiddleware[K]) ParseTokenString(token string, opts *Options) (*jwt.Token, error) {
 	if mw.KeyFunc != nil {
 		return jwt.Parse(token, mw.KeyFunc, mw.ParseOptions...)
 	}
@@ -936,7 +1096,7 @@ func (mw *GinJWTMiddleware[K]) ParseTokenString(token string) (*jwt.Token, error
 			return nil, ErrInvalidSigningAlgorithm
 		}
 		if mw.usingPublicKeyAlgo() {
-			return mw.pubKey, nil
+			return mw.pubKey[opts.SignerName], nil
 		}
 
 		return mw.Key, nil

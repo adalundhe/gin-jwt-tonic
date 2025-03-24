@@ -87,7 +87,13 @@ func TestMissingPrivKey(t *testing.T) {
 	_, err := New(&GinJWTMiddleware[*Login]{
 		Realm:            "zone",
 		SigningAlgorithm: "RS256",
-		PrivKeyFile:      "nonexisting",
+	}, Signer{
+		Name: "test",
+		Keys: []Key{
+			Key{
+				PrivKeyFile: "nonexisting",
+			},
+		},
 	})
 
 	assert.Error(t, err)
@@ -98,8 +104,14 @@ func TestMissingPubKey(t *testing.T) {
 	_, err := New(&GinJWTMiddleware[*Login]{
 		Realm:            "zone",
 		SigningAlgorithm: "RS256",
-		PrivKeyFile:      "testdata/jwtRS256.key",
-		PubKeyFile:       "nonexisting",
+	}, Signer{
+		Name: "test",
+		Keys: []Key{
+			{
+				PrivKeyFile: "testdata/jwtRS256.key",
+				PubKeyFile:  "nonexisting",
+			},
+		},
 	})
 
 	assert.Error(t, err)
@@ -110,8 +122,14 @@ func TestInvalidPrivKey(t *testing.T) {
 	_, err := New(&GinJWTMiddleware[*Login]{
 		Realm:            "zone",
 		SigningAlgorithm: "RS256",
-		PrivKeyFile:      "testdata/invalidprivkey.key",
-		PubKeyFile:       "testdata/jwtRS256.key.pub",
+	}, Signer{
+		Name: "test",
+		Keys: []Key{
+			{
+				PrivKeyFile: "testdata/invalidprivkey.key",
+				PubKeyFile:  "testdata/jwtRS256.key.pub",
+			},
+		},
 	})
 
 	assert.Error(t, err)
@@ -122,8 +140,14 @@ func TestInvalidPrivKeyBytes(t *testing.T) {
 	_, err := New(&GinJWTMiddleware[*Login]{
 		Realm:            "zone",
 		SigningAlgorithm: "RS256",
-		PrivKeyBytes:     []byte("Invalid_Private_Key"),
-		PubKeyFile:       "testdata/jwtRS256.key.pub",
+	}, Signer{
+		Name: "test",
+		Keys: []Key{
+			Key{
+				Data:       "Invalid_Private_Key",
+				PubKeyFile: "testdata/jwtRS256.key.pub",
+			},
+		},
 	})
 
 	assert.Error(t, err)
@@ -134,8 +158,14 @@ func TestInvalidPubKey(t *testing.T) {
 	_, err := New(&GinJWTMiddleware[*Login]{
 		Realm:            "zone",
 		SigningAlgorithm: "RS256",
-		PrivKeyFile:      "testdata/jwtRS256.key",
-		PubKeyFile:       "testdata/invalidpubkey.key",
+	}, Signer{
+		Name: "test",
+		Keys: []Key{
+			Key{
+				PrivKeyFile: "testdata/jwtRS256.key",
+				PubKeyFile:  "testdata/invalidpubkey.key",
+			},
+		},
 	})
 
 	assert.Error(t, err)
@@ -146,8 +176,14 @@ func TestInvalidPubKeyBytes(t *testing.T) {
 	_, err := New(&GinJWTMiddleware[*Login]{
 		Realm:            "zone",
 		SigningAlgorithm: "RS256",
-		PrivKeyFile:      "testdata/jwtRS256.key",
-		PubKeyBytes:      []byte("Invalid_Private_Key"),
+	}, Signer{
+		Name: "test",
+		Keys: []Key{
+			{
+				PrivKeyFile: "testdata/jwtRS256.key",
+				Data:        "Invalid_Private_Key",
+			},
+		},
 	})
 
 	assert.Error(t, err)
@@ -367,14 +403,23 @@ func TestParseToken(t *testing.T) {
 func TestParseTokenRS256(t *testing.T) {
 	// the middleware to test
 	authMiddleware, _ := New(&GinJWTMiddleware[*Login]{
+		DefaultOptions: &Options{
+			SignerName: "test",
+		},
 		Realm:            "test zone",
 		Key:              key,
 		Timeout:          time.Hour,
 		MaxRefresh:       time.Hour * 24,
 		SigningAlgorithm: "RS256",
-		PrivKeyFile:      "testdata/jwtRS256.key",
-		PubKeyFile:       "testdata/jwtRS256.key.pub",
 		Authenticator:    defaultAuthenticator,
+	}, Signer{
+		Name: "test",
+		Keys: []Key{
+			{
+				PrivKeyFile: "testdata/jwtRS256.key",
+				PubKeyFile:  "testdata/jwtRS256.key.pub",
+			},
+		},
 	})
 
 	handler := ginHandler(authMiddleware)
@@ -425,8 +470,14 @@ func TestParseTokenKeyFunc(t *testing.T) {
 		// make sure it skips these settings
 		Key:              []byte(""),
 		SigningAlgorithm: "RS256",
-		PrivKeyFile:      "",
-		PubKeyFile:       "",
+	}, Signer{
+		Name: "test",
+		Keys: []Key{
+			Key{
+				PrivKeyFile: "",
+				PubKeyFile:  "",
+			},
+		},
 	})
 
 	handler := ginHandler(authMiddleware)
@@ -469,13 +520,14 @@ func TestParseTokenKeyFunc(t *testing.T) {
 func TestRefreshHandlerRS256(t *testing.T) {
 	// the middleware to test
 	authMiddleware, _ := New(&GinJWTMiddleware[*Login]{
+		DefaultOptions: &Options{
+			SignerName: "test",
+		},
 		Realm:            "test zone",
 		Key:              key,
 		Timeout:          time.Hour,
 		MaxRefresh:       time.Hour * 24,
 		SigningAlgorithm: "RS256",
-		PrivKeyFile:      "testdata/jwtRS256.key",
-		PubKeyFile:       "testdata/jwtRS256.key.pub",
 		SendCookie:       true,
 		CookieName:       "jwt",
 		Authenticator:    defaultAuthenticator,
@@ -492,6 +544,14 @@ func TestRefreshHandlerRS256(t *testing.T) {
 				Message: "refresh successfully",
 				Cookie:  cookie,
 			}, nil
+		},
+	}, Signer{
+		Name: "test",
+		Keys: []Key{
+			{
+				PrivKeyFile: "testdata/jwtRS256.key",
+				PubKeyFile:  "testdata/jwtRS256.key.pub",
+			},
 		},
 	})
 
@@ -753,7 +813,7 @@ func TestClaimsDuringAuthorization(t *testing.T) {
 
 	userToken, _, _ := authMiddleware.TokenGenerator(jwt.MapClaims{
 		"identity": "administrator",
-	})
+	}, &Options{})
 
 	r.GET("/auth/hello").
 		SetHeader(gofight.H{
@@ -896,7 +956,7 @@ func TestTokenExpire(t *testing.T) {
 
 	userToken, _, _ := authMiddleware.TokenGenerator(jwt.MapClaims{
 		"identity": "admin",
-	})
+	}, &Options{})
 
 	r.GET("/auth/refresh_token").
 		SetHeader(gofight.H{
@@ -926,7 +986,7 @@ func TestTokenFromQueryString(t *testing.T) {
 
 	userToken, _, _ := authMiddleware.TokenGenerator(jwt.MapClaims{
 		"identity": "admin",
-	})
+	}, &Options{})
 
 	r.GET("/auth/refresh_token").
 		SetHeader(gofight.H{
@@ -964,7 +1024,7 @@ func TestTokenFromParamPath(t *testing.T) {
 
 	userToken, _, _ := authMiddleware.TokenGenerator(jwt.MapClaims{
 		"identity": "admin",
-	})
+	}, &Options{})
 
 	r.GET("/auth/refresh_token").
 		SetHeader(gofight.H{
@@ -999,7 +1059,7 @@ func TestTokenFromCookieString(t *testing.T) {
 
 	userToken, _, _ := authMiddleware.TokenGenerator(jwt.MapClaims{
 		"identity": "admin",
-	})
+	}, &Options{})
 
 	r.GET("/auth/refresh_token").
 		SetHeader(gofight.H{
@@ -1257,7 +1317,7 @@ func TestCheckTokenString(t *testing.T) {
 
 	userToken, _, _ := authMiddleware.TokenGenerator(jwt.MapClaims{
 		"identity": "admin",
-	})
+	}, &Options{})
 
 	r.GET("/auth/hello").
 		SetHeader(gofight.H{
@@ -1267,7 +1327,7 @@ func TestCheckTokenString(t *testing.T) {
 			assert.Equal(t, http.StatusOK, r.Code)
 		})
 
-	token, err := authMiddleware.ParseTokenString(userToken)
+	token, err := authMiddleware.ParseTokenString(userToken, &Options{})
 	assert.NoError(t, err)
 	claims := ExtractClaimsFromToken(token)
 	assert.Equal(t, "admin", claims["identity"])
@@ -1282,7 +1342,7 @@ func TestCheckTokenString(t *testing.T) {
 			assert.Equal(t, http.StatusUnauthorized, r.Code)
 		})
 
-	_, err = authMiddleware.ParseTokenString(userToken)
+	_, err = authMiddleware.ParseTokenString(userToken, &Options{})
 	assert.Error(t, err)
 	assert.Equal(t, jwt.MapClaims{}, ExtractClaimsFromToken(nil))
 }
@@ -1401,7 +1461,7 @@ func TestCreateToken(t *testing.T) {
 
 	t.Run("it creates a token given valid data", func(t *testing.T) {
 
-		generated, err := authMiddleware.CreateToken(mappedClaims)
+		generated, err := authMiddleware.CreateToken(mappedClaims, &Options{})
 
 		assert.Nil(t, err)
 		assert.IsType(t, &GeneratedToken{}, generated)
@@ -1422,14 +1482,14 @@ func TestCreateToken(t *testing.T) {
 	originalExpirationTime := time.Now().Unix()
 	claims[authMiddleware.ExpField] = originalExpirationTime
 	claims["orig_iat"] = authMiddleware.TimeFunc().Unix()
-	tokenString, err := authMiddleware.signedString(token)
+	tokenString, err := authMiddleware.signedString(token, &Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	t.Run("it refreshes a token given a valid token that has expired", func(t *testing.T) {
 
-		generated, err := authMiddleware.RefreshIfRequired(tokenString)
+		generated, err := authMiddleware.RefreshIfRequired(tokenString, &Options{})
 
 		assert.Nil(t, err)
 		assert.IsType(t, &GeneratedToken{}, generated)
@@ -1453,14 +1513,14 @@ func TestCreateToken(t *testing.T) {
 	).Unix()
 	claims[authMiddleware.ExpField] = originalExpirationTime
 	claims["orig_iat"] = authMiddleware.TimeFunc().Unix()
-	tokenString, err = authMiddleware.signedString(token)
+	tokenString, err = authMiddleware.signedString(token, &Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	t.Run("it refreshes a token given a valid token that has not yet expired", func(t *testing.T) {
 
-		generated, err := authMiddleware.RefreshIfRequired(tokenString)
+		generated, err := authMiddleware.RefreshIfRequired(tokenString, &Options{})
 
 		assert.Nil(t, err)
 		assert.IsType(t, &GeneratedToken{}, generated)
