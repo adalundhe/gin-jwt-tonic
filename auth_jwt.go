@@ -652,7 +652,7 @@ func (mw *GinJWTMiddleware[K]) RefreshHandler(c *gin.Context) (*AuthResponse, er
 	return mw.RefreshResponse(c, http.StatusOK, tokenString, expire)
 }
 
-func (mw *GinJWTMiddleware[K]) RefreshTokenFromString(token string) (*GeneratedToken, error) {
+func (mw *GinJWTMiddleware[K]) RefreshIfRequired(token string) (*GeneratedToken, error) {
 	claims, expired, err := mw.CheckIfExpired(token)
 	if err != nil {
 		return &GeneratedToken{

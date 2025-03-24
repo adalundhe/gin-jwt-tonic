@@ -1429,7 +1429,7 @@ func TestCreateToken(t *testing.T) {
 
 	t.Run("it refreshes a token given a valid token that has expired", func(t *testing.T) {
 
-		generated, err := authMiddleware.RefreshTokenFromString(tokenString)
+		generated, err := authMiddleware.RefreshIfRequired(tokenString)
 
 		assert.Nil(t, err)
 		assert.IsType(t, &GeneratedToken{}, generated)
@@ -1460,7 +1460,7 @@ func TestCreateToken(t *testing.T) {
 
 	t.Run("it refreshes a token given a valid token that has not yet expired", func(t *testing.T) {
 
-		generated, err := authMiddleware.RefreshTokenFromString(tokenString)
+		generated, err := authMiddleware.RefreshIfRequired(tokenString)
 
 		assert.Nil(t, err)
 		assert.IsType(t, &GeneratedToken{}, generated)
