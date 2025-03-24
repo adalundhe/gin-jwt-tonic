@@ -1466,7 +1466,7 @@ func TestCreateToken(t *testing.T) {
 		assert.IsType(t, &GeneratedToken{}, generated)
 		assert.NotNil(t, generated.Token)
 		assert.IsType(t, time.Time{}, generated.Expire)
-		assert.Greater(t, generated.Expire.Unix(), originalExpirationTime)
+		assert.Equal(t, generated.Expire.Unix(), originalExpirationTime)
 
 	})
 }

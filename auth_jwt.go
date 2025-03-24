@@ -4,6 +4,7 @@ import (
 	"crypto/rsa"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"os"
 	"strings"
@@ -652,7 +653,7 @@ func (mw *GinJWTMiddleware[K]) RefreshHandler(c *gin.Context) (*AuthResponse, er
 }
 
 func (mw *GinJWTMiddleware[K]) RefreshTokenFromString(token string) (*GeneratedToken, error) {
-	claims, err := mw.CheckIfExpired(token)
+	claims, expired, err := mw.CheckIfExpired(token)
 	if err != nil {
 		return &GeneratedToken{
 			Token:  "",
@@ -660,6 +661,16 @@ func (mw *GinJWTMiddleware[K]) RefreshTokenFromString(token string) (*GeneratedT
 		}, err
 	}
 
+	if !expired {
+		sec, dec := math.Modf(claims["exp"].(float64))
+		return &GeneratedToken{
+			Token: token,
+			Expire: time.Unix(
+				int64(sec),
+				int64(dec*(1e9)),
+			),
+		}, nil
+	}
 	// Create the token
 	newToken := jwt.New(jwt.GetSigningMethod(mw.SigningAlgorithm))
 	newClaims := newToken.Claims.(jwt.MapClaims)
@@ -739,8 +750,10 @@ func (mw *GinJWTMiddleware[K]) CheckIfTokenExpire(c *gin.Context) (jwt.MapClaims
 	return claims, nil
 }
 
-func (mw *GinJWTMiddleware[K]) CheckIfExpired(tokenString string) (jwt.MapClaims, error) {
+func (mw *GinJWTMiddleware[K]) CheckIfExpired(tokenString string) (jwt.MapClaims, bool, error) {
 	token, err := mw.ParseTokenFromString(tokenString)
+
+	expired := false
 	if err != nil {
 		// If we receive an error, and the error is anything other than a single
 		// ValidationErrorExpired, we want to return the error.
@@ -749,8 +762,10 @@ func (mw *GinJWTMiddleware[K]) CheckIfExpired(tokenString string) (jwt.MapClaims
 		// (see https://github.com/appleboy/gin-jwt/issues/176)
 		validationErr, ok := err.(*jwt.ValidationError)
 		if !ok || validationErr.Errors != jwt.ValidationErrorExpired {
-			return nil, err
+			return nil, expired, err
 		}
+
+		expired = true
 	}
 
 	claims := token.Claims.(jwt.MapClaims)
@@ -758,10 +773,10 @@ func (mw *GinJWTMiddleware[K]) CheckIfExpired(tokenString string) (jwt.MapClaims
 	origIat := int64(claims["orig_iat"].(float64))
 
 	if origIat < mw.TimeFunc().Add(-mw.MaxRefresh).Unix() {
-		return nil, ErrExpiredToken
+		return nil, expired, ErrExpiredToken
 	}
 
-	return claims, nil
+	return claims, expired, nil
 }
 
 // TokenGenerator method that clients can use to get a jwt token.
