@@ -14,9 +14,12 @@ import (
 
 	"github.com/appleboy/gofight/v2"
 	"github.com/gin-gonic/gin"
+	"github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jose-util/generator"
 	"github.com/golang-jwt/jwt/v4"
 	"github.com/loopfz/gadgeto/tonic"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 )
 
@@ -1327,7 +1330,7 @@ func TestCheckTokenString(t *testing.T) {
 			assert.Equal(t, http.StatusOK, r.Code)
 		})
 
-	token, err := authMiddleware.ParseTokenString(userToken, &Options{})
+	token, err := authMiddleware.ParseTokenFromString(userToken, &Options{})
 	assert.NoError(t, err)
 	claims := ExtractClaimsFromToken(token)
 	assert.Equal(t, "admin", claims["identity"])
@@ -1342,7 +1345,7 @@ func TestCheckTokenString(t *testing.T) {
 			assert.Equal(t, http.StatusUnauthorized, r.Code)
 		})
 
-	_, err = authMiddleware.ParseTokenString(userToken, &Options{})
+	_, err = authMiddleware.ParseTokenFromString(userToken, &Options{})
 	assert.Error(t, err)
 	assert.Equal(t, jwt.MapClaims{}, ExtractClaimsFromToken(nil))
 }
@@ -1528,5 +1531,315 @@ func TestCreateToken(t *testing.T) {
 		assert.IsType(t, time.Time{}, generated.Expire)
 		assert.Equal(t, generated.Expire.Unix(), originalExpirationTime)
 
+	})
+}
+
+func generateJWKSJsons(t *testing.T) (string, string) {
+	keyUsage := "sig"
+	keyAlgorithm := jose.RS512
+	publicKey, privateKey, err := generator.NewSigningKey(keyAlgorithm, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	publicKeyJwk := &jose.JSONWebKey{
+		Key:       publicKey,
+		Algorithm: string(keyAlgorithm),
+		Use:       keyUsage,
+	}
+
+	privateKeyJwk := &jose.JSONWebKey{
+		Key:       privateKey,
+		Algorithm: string(keyAlgorithm),
+		Use:       keyUsage,
+	}
+
+	publicKeyJwkBytes, err := publicKeyJwk.MarshalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	privateKeyJwkBytes, err := privateKeyJwk.MarshalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return string(publicKeyJwkBytes), string(privateKeyJwkBytes)
+}
+
+func TestJWKToken(t *testing.T) {
+	publicKeyJwkBytes, privateKeyJwkBytes := generateJWKSJsons(t)
+
+	// Create JWSProviderImpl instance
+	authMiddleware, err := New(&GinJWTMiddleware[*Login]{
+		DefaultOptions: &Options{
+			SignerName: "test",
+		},
+		SigningAlgorithm: "RS512",
+		Realm:            "test zone",
+		Key:              key,
+		Timeout:          time.Hour,
+		MaxRefresh:       time.Hour * 24,
+		SendCookie:       true,
+		CookieName:       "jwt",
+		Authenticator:    defaultAuthenticator,
+		RefreshResponse: func(c *gin.Context, code int, token string, t time.Time) (*AuthResponse, error) {
+			cookie, err := c.Cookie("jwt")
+			if err != nil {
+				return nil, err
+			}
+
+			return &AuthResponse{
+				Code:    http.StatusOK,
+				Token:   token,
+				Expire:  t.Format(time.RFC3339),
+				Message: "refresh successfully",
+				Cookie:  cookie,
+			}, nil
+		},
+	}, Signer{
+		Name: "test",
+		Keys: []Key{
+			{
+				Data:  publicKeyJwkBytes,
+				IsJWK: true,
+			},
+			{
+				Data:  privateKeyJwkBytes,
+				IsJWK: true,
+			},
+		},
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("Sign and Verify", func(t *testing.T) {
+		payload := map[string]interface{}{
+			"key1": "value1",
+			"key2": float64(42), // needed because map[string]interface{} does is not roundtrip safe with ints
+		}
+
+		newToken := jwt.New(jwt.GetSigningMethod(authMiddleware.SigningAlgorithm))
+		newClaims := newToken.Claims.(jwt.MapClaims)
+
+		for key := range payload {
+			newClaims[key] = payload[key]
+		}
+
+		// Sign the payload
+		token, err := authMiddleware.signJWK(newToken, &Options{
+			SignerName: "test",
+		})
+		assert.NoError(t, err)
+		assert.NotEmpty(t, token)
+
+		// Verify the token
+		verifiedPayload, verified, err := authMiddleware.parseJWK(token, &Options{
+			SignerName: "test",
+		})
+
+		assert.NoError(t, err)
+		assert.NotEmpty(t, verified)
+		assert.NotNil(t, verifiedPayload)
+
+		// Compare the verified payload with the original
+		assert.NoError(t, err)
+		assert.Equal(t, newClaims, verifiedPayload.Claims.(jwt.MapClaims))
+	})
+
+	t.Run("Sign with invalid payload", func(t *testing.T) {
+		_, err := authMiddleware.signJWK(nil, &Options{
+			SignerName: "test",
+		})
+		assert.Error(t, err)
+	})
+
+	t.Run("Verify with invalid token", func(t *testing.T) {
+		_, token, err := authMiddleware.parseJWK("invalid.token", &Options{
+			SignerName: "test",
+		})
+		assert.Empty(t, token)
+		assert.Error(t, err)
+	})
+
+	t.Run("Verify with non-existent verifier", func(t *testing.T) {
+		payload := make(map[string]interface{})
+		newToken := jwt.New(jwt.GetSigningMethod(authMiddleware.SigningAlgorithm))
+		newClaims := newToken.Claims.(jwt.MapClaims)
+
+		for key := range payload {
+			newClaims[key] = payload[key]
+		}
+
+		token, err := authMiddleware.signJWK(newToken, &Options{
+			SignerName: "test",
+		})
+		require.NoError(t, err)
+
+		_, token, err = authMiddleware.parseJWK(token, &Options{
+			SignerName: "non-existent",
+		})
+		assert.Empty(t, token)
+		assert.Error(t, err)
+	})
+
+	mismatchedJwksPublicKey, mismatchedJwksPrivateKey := generateJWKSJsons(t)
+
+	authMiddleware, err = New(&GinJWTMiddleware[*Login]{
+		DefaultOptions: &Options{
+			SignerName: "test",
+		},
+		SigningAlgorithm: "RS512",
+		Realm:            "test zone",
+		Key:              key,
+		Timeout:          time.Hour,
+		MaxRefresh:       time.Hour * 24,
+		SendCookie:       true,
+		CookieName:       "jwt",
+		Authenticator:    defaultAuthenticator,
+		RefreshResponse: func(c *gin.Context, code int, token string, t time.Time) (*AuthResponse, error) {
+			cookie, err := c.Cookie("jwt")
+			if err != nil {
+				return nil, err
+			}
+
+			return &AuthResponse{
+				Code:    http.StatusOK,
+				Token:   token,
+				Expire:  t.Format(time.RFC3339),
+				Message: "refresh successfully",
+				Cookie:  cookie,
+			}, nil
+		},
+	}, Signer{
+		Name: "test",
+		Keys: []Key{
+			{
+				Data:  publicKeyJwkBytes,
+				IsJWK: true,
+			},
+			{
+				Data:  privateKeyJwkBytes,
+				IsJWK: true,
+			},
+		},
+	}, Signer{
+		Name: "mismatched",
+		Keys: []Key{
+			{
+				Data:  mismatchedJwksPublicKey,
+				IsJWK: true,
+			},
+			{
+				Data:  mismatchedJwksPrivateKey,
+				IsJWK: true,
+			},
+		},
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("Verify with mismatched key", func(t *testing.T) {
+		// Generate a different key pair
+
+		payload := map[string]interface{}{
+			"key1": "value1",
+			"key2": float64(42), // needed because map[string]interface{} does is not roundtrip safe with ints
+		}
+
+		newToken := jwt.New(jwt.GetSigningMethod(authMiddleware.SigningAlgorithm))
+		newClaims := newToken.Claims.(jwt.MapClaims)
+
+		for key := range payload {
+			newClaims[key] = payload[key]
+		}
+
+		token, err := authMiddleware.signJWK(newToken, &Options{
+			SignerName: "test",
+		})
+		require.NoError(t, err)
+
+		_, parsed, err := authMiddleware.parseJWK(token, &Options{
+			SignerName: "mismatched",
+		})
+		assert.Empty(t, parsed)
+		assert.Error(t, err)
+	})
+}
+
+func TestSignTokenString(t *testing.T) {
+
+	publicKeyJwkBytes, privateKeyJwkBytes := generateJWKSJsons(t)
+
+	// Create JWSProviderImpl instance
+	authMiddleware, err := New(&GinJWTMiddleware[*Login]{
+		DefaultOptions: &Options{
+			SignerName: "test",
+		},
+		SigningAlgorithm: "RS512",
+		Realm:            "test zone",
+		Key:              key,
+		Timeout:          time.Hour,
+		MaxRefresh:       time.Hour * 24,
+		SendCookie:       true,
+		CookieName:       "jwt",
+		Authenticator:    defaultAuthenticator,
+		RefreshResponse: func(c *gin.Context, code int, token string, t time.Time) (*AuthResponse, error) {
+			cookie, err := c.Cookie("jwt")
+			if err != nil {
+				return nil, err
+			}
+
+			return &AuthResponse{
+				Code:    http.StatusOK,
+				Token:   token,
+				Expire:  t.Format(time.RFC3339),
+				Message: "refresh successfully",
+				Cookie:  cookie,
+			}, nil
+		},
+	}, Signer{
+		Name: "test",
+		Keys: []Key{
+			{
+				Data:  publicKeyJwkBytes,
+				IsJWK: true,
+			},
+			{
+				Data:  privateKeyJwkBytes,
+				IsJWK: true,
+			},
+		},
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("it signs JWK tokens and returns a token string", func(t *testing.T) {
+
+		payload := map[string]interface{}{
+			"key1": "value1",
+			"key2": float64(42), // needed because map[string]interface{} does is not roundtrip safe with ints
+		}
+
+		newToken := jwt.New(jwt.GetSigningMethod(authMiddleware.SigningAlgorithm))
+		newClaims := newToken.Claims.(jwt.MapClaims)
+
+		for key := range payload {
+			newClaims[key] = payload[key]
+		}
+
+		token, err := authMiddleware.signedString(newToken, &Options{
+			SignerName: "test",
+		})
+
+		assert.NoError(t, err)
+		assert.NotNil(t, token)
+		assert.NotEmpty(t, token)
 	})
 }

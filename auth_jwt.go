@@ -273,6 +273,11 @@ func (mw *GinJWTMiddleware[K]) readKey(
 	signerName string,
 	key Key,
 ) error {
+
+	if key.IsJWK {
+		return mw.readPublicKey(signerName, key)
+	}
+
 	err := mw.readPrivateKey(signerName, key)
 	if err != nil {
 		return err
@@ -345,7 +350,7 @@ func (mw *GinJWTMiddleware[K]) readPublicKey(
 	}
 
 	if key.IsJWK {
-		err = mw.readJWK(signerName, keyData)
+		return mw.readJWK(signerName, key, keyData)
 	}
 
 	if err != nil {
@@ -530,30 +535,33 @@ func (mw *GinJWTMiddleware[K]) MiddlewareInit(signers ...Signer) error {
 
 func (mw *GinJWTMiddleware[K]) readJWK(
 	signerName string,
+	key Key,
 	keyData []byte,
 ) error {
-	key := &jose.JSONWebKey{}
-	err := key.UnmarshalJSON(keyData)
+	jwkKey := &jose.JSONWebKey{}
+	err := jwkKey.UnmarshalJSON(keyData)
 	if err != nil {
 		return err
 	}
-	if key.IsPublic() {
+	if jwkKey.IsPublic() {
 		if _, ok := mw.VerifierKeys[signerName]; ok {
 			return fmt.Errorf("multiple public keys for environment %s", signerName)
 		}
 
-		mw.VerifierKeys[signerName] = key
+		mw.VerifierKeys[signerName] = jwkKey
 
 	} else {
 		if _, ok := mw.Signers[signerName]; ok {
 			return fmt.Errorf("multiple private keys for environment %s", signerName)
 		}
-		newSigner, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.SignatureAlgorithm(key.Algorithm), Key: key.Key}, nil)
+		newSigner, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.SignatureAlgorithm(jwkKey.Algorithm), Key: jwkKey.Key}, nil)
 		if err != nil {
 			return err
 		}
 		mw.Signers[signerName] = newSigner
 	}
+
+	mw.Keys[signerName] = &key
 
 	return nil
 }
@@ -745,7 +753,7 @@ func (mw *GinJWTMiddleware[K]) LogoutHandler(c *gin.Context) (*AuthResponse, err
 func (mw *GinJWTMiddleware[K]) signedString(token *jwt.Token, opts *Options) (string, error) {
 
 	signerName := opts.SignerName
-	if signerName == "" || !mw.usingPublicKeyAlgo() {
+	if signerName == "" && !mw.usingPublicKeyAlgo() {
 		return token.SignedString(mw.Key)
 	}
 
@@ -755,19 +763,29 @@ func (mw *GinJWTMiddleware[K]) signedString(token *jwt.Token, opts *Options) (st
 	}
 
 	if key.IsJWK {
-		return mw.signJWK(signerName)
+		return mw.signJWK(token, opts)
 	}
 
 	return token.SignedString(mw.privKey[signerName])
 }
 
-func (mw *GinJWTMiddleware[K]) signJWK(signerName string) (string, error) {
+func (mw *GinJWTMiddleware[K]) signJWK(token *jwt.Token, opts *Options) (string, error) {
 
-	payload := mw.PubKeyBytes[signerName]
+	if token == nil || token.Claims == nil {
+		return "", fmt.Errorf("payload is empty")
+	}
 
-	signer, ok := mw.Signers[signerName]
+	payload, err := json.Marshal(token.Claims.(jwt.MapClaims))
+	if err != nil {
+		return "", err
+	}
+
+	if payload == nil {
+		return "", fmt.Errorf("payload is empty")
+	}
+	signer, ok := mw.Signers[opts.SignerName]
 	if !ok {
-		return "", fmt.Errorf("signer %s not found", signerName)
+		return "", fmt.Errorf("signer %s not found", opts.SignerName)
 	}
 	signedPayload, err := signer.Sign(payload)
 	if err != nil {
@@ -1031,6 +1049,16 @@ func (mw *GinJWTMiddleware[K]) ParseToken(c *gin.Context, opts *Options) (*jwt.T
 		return nil, err
 	}
 
+	if mw.checkIfJWK(opts) {
+		jwtToken, verifiedToken, err := mw.parseJWK(token, opts)
+
+		if err != nil {
+			c.Set("JWT_TOKEN", verifiedToken)
+		}
+
+		return jwtToken, err
+	}
+
 	if mw.KeyFunc != nil {
 		return jwt.Parse(token, mw.KeyFunc, mw.ParseOptions...)
 	}
@@ -1050,11 +1078,43 @@ func (mw *GinJWTMiddleware[K]) ParseToken(c *gin.Context, opts *Options) (*jwt.T
 	}, mw.ParseOptions...)
 }
 
+func (mw *GinJWTMiddleware[K]) parseJWK(token string, opts *Options) (*jwt.Token, string, error) {
+	verifiedToken, err := jose.ParseSigned(token, []jose.SignatureAlgorithm{jose.SignatureAlgorithm(mw.SigningAlgorithm)})
+	if err != nil {
+		return nil, "", err
+	}
+	verifier, ok := mw.VerifierKeys[opts.SignerName]
+	if !ok {
+		return nil, "", fmt.Errorf("verifier %s not found", opts.SignerName)
+	}
+	payload, err := verifiedToken.Verify(verifier)
+	if err != nil {
+		return nil, "", fmt.Errorf("jwt verification failed: %w", err)
+	}
+
+	jwtToken := jwt.New(jwt.GetSigningMethod(mw.SigningAlgorithm))
+	claims := jwtToken.Claims.(jwt.MapClaims)
+
+	err = json.Unmarshal(payload, &claims)
+	if err != nil {
+		return nil, "", err
+	}
+
+	verified := string(payload)
+
+	return jwtToken, verified, err
+}
+
 // ParseToken parse jwt token from string
 func (mw *GinJWTMiddleware[K]) ParseTokenFromString(token string, opts *Options) (*jwt.Token, error) {
 
 	if mw.KeyFunc != nil {
 		return jwt.Parse(token, mw.KeyFunc, mw.ParseOptions...)
+	}
+	if mw.checkIfJWK(opts) {
+		jwtToken, _, err := mw.parseJWK(token, opts)
+
+		return jwtToken, err
 	}
 
 	return jwt.Parse(token, func(t *jwt.Token) (interface{}, error) {
@@ -1083,24 +1143,6 @@ func (mw *GinJWTMiddleware[K]) checkIfJWK(opts *Options) bool {
 
 	return key.IsJWK
 
-}
-
-// ParseTokenString parse jwt token string
-func (mw *GinJWTMiddleware[K]) ParseTokenString(token string, opts *Options) (*jwt.Token, error) {
-	if mw.KeyFunc != nil {
-		return jwt.Parse(token, mw.KeyFunc, mw.ParseOptions...)
-	}
-
-	return jwt.Parse(token, func(t *jwt.Token) (interface{}, error) {
-		if jwt.GetSigningMethod(mw.SigningAlgorithm) != t.Method {
-			return nil, ErrInvalidSigningAlgorithm
-		}
-		if mw.usingPublicKeyAlgo() {
-			return mw.pubKey[opts.SignerName], nil
-		}
-
-		return mw.Key, nil
-	}, mw.ParseOptions...)
 }
 
 func (mw *GinJWTMiddleware[K]) unauthorized(c *gin.Context, code int, message string) {
