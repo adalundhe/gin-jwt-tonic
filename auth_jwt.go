@@ -884,8 +884,16 @@ func (mw *GinJWTMiddleware[K]) RefreshIfRequired(token string, opts *Options) (*
 }
 
 // RefreshToken refresh token and check if token is expired
-func (mw *GinJWTMiddleware[K]) RefreshToken(c *gin.Context, opts *Options) (string, time.Time, error) {
-	claims, err := mw.CheckIfTokenExpire(c, opts)
+func (mw *GinJWTMiddleware[K]) RefreshToken(c *gin.Context, opts ...*Options) (string, time.Time, error) {
+
+	var options *Options
+	if len(opts) > 0 {
+		options = opts[0]
+	} else {
+		options = mw.DefaultOptions
+	}
+
+	claims, err := mw.CheckIfTokenExpire(c, options)
 	if err != nil {
 		return "", time.Now(), err
 	}
@@ -902,7 +910,7 @@ func (mw *GinJWTMiddleware[K]) RefreshToken(c *gin.Context, opts *Options) (stri
 	newClaims[mw.ExpField] = expire.Unix()
 	newClaims["orig_iat"] = mw.TimeFunc().Unix()
 
-	tokenString, err := mw.signedString(newToken, opts)
+	tokenString, err := mw.signedString(newToken, options)
 	if err != nil {
 		return "", time.Now(), err
 	}
