@@ -46,6 +46,7 @@ type GinJWTMiddleware[K interface{}] struct {
 	Realm string
 
 	DefaultOptions *Options
+	DefaultSigner  *Signer
 
 	// signing algorithm - possible values are HS256, HS384, HS512, RS256, RS384 or RS512
 	// Optional, default is HS256.
@@ -523,6 +524,19 @@ func (mw *GinJWTMiddleware[K]) MiddlewareInit(signers ...Signer) error {
 			}
 		}
 
+		fmt.Println(mw.DefaultSigner)
+
+		if defaultSigner := mw.DefaultSigner; defaultSigner != nil {
+
+			for _, key := range defaultSigner.Keys {
+				err := mw.readKey(defaultSigner.Name, key)
+				if err != nil {
+					return err
+				}
+
+			}
+		}
+
 		return nil
 	}
 
@@ -567,10 +581,10 @@ func (mw *GinJWTMiddleware[K]) readJWK(
 }
 
 // MiddlewareFunc makes GinJWTMiddleware implement the Middleware interface.
-func (mw *GinJWTMiddleware[K]) MiddlewareFunc(opts ...Options) gin.HandlerFunc {
+func (mw *GinJWTMiddleware[K]) MiddlewareFunc(opts ...*Options) gin.HandlerFunc {
 
 	if len(opts) > 0 {
-		mw.DefaultOptions = &opts[0]
+		mw.DefaultOptions = opts[0]
 	}
 
 	return func(c *gin.Context) {
@@ -700,7 +714,7 @@ func (mw *GinJWTMiddleware[K]) LoginHandler(c *gin.Context, req K) (*AuthRespons
 	return mw.LoginResponse(c, http.StatusOK, generated.Token, generated.Expire)
 }
 
-func (mw *GinJWTMiddleware[K]) CreateToken(data interface{}, opts *Options) (*GeneratedToken, error) {
+func (mw *GinJWTMiddleware[K]) CreateToken(data interface{}, opts ...*Options) (*GeneratedToken, error) {
 	token := jwt.New(jwt.GetSigningMethod(mw.SigningAlgorithm))
 	claims := token.Claims.(jwt.MapClaims)
 
@@ -710,10 +724,17 @@ func (mw *GinJWTMiddleware[K]) CreateToken(data interface{}, opts *Options) (*Ge
 		}
 	}
 
+	var options *Options
+	if len(opts) > 0 {
+		options = opts[0]
+	} else {
+		options = mw.DefaultOptions
+	}
+
 	expire := mw.TimeFunc().Add(mw.TimeoutFunc(claims))
 	claims[mw.ExpField] = expire.Unix()
 	claims["orig_iat"] = mw.TimeFunc().Unix()
-	tokenString, err := mw.signedString(token, opts)
+	tokenString, err := mw.signedString(token, options)
 	if err != nil {
 		return nil, err
 	}
@@ -755,6 +776,13 @@ func (mw *GinJWTMiddleware[K]) signedString(token *jwt.Token, opts *Options) (st
 	signerName := opts.SignerName
 	if signerName == "" && !mw.usingPublicKeyAlgo() {
 		return token.SignedString(mw.Key)
+	}
+
+	if signerName == "" && mw.DefaultSigner != nil {
+		signerName = mw.DefaultSigner.Name
+		opts = &Options{
+			SignerName: signerName,
+		}
 	}
 
 	key, ok := mw.Keys[signerName]
@@ -1049,7 +1077,7 @@ func (mw *GinJWTMiddleware[K]) ParseToken(c *gin.Context, opts *Options) (*jwt.T
 		return nil, err
 	}
 
-	if mw.checkIfJWK(opts) {
+	if opts := mw.checkIfJWK(opts); opts != nil {
 		jwtToken, verifiedToken, err := mw.parseJWK(token, opts)
 
 		if err != nil {
@@ -1111,7 +1139,7 @@ func (mw *GinJWTMiddleware[K]) ParseTokenFromString(token string, opts *Options)
 	if mw.KeyFunc != nil {
 		return jwt.Parse(token, mw.KeyFunc, mw.ParseOptions...)
 	}
-	if mw.checkIfJWK(opts) {
+	if opts := mw.checkIfJWK(opts); opts != nil {
 		jwtToken, _, err := mw.parseJWK(token, opts)
 
 		return jwtToken, err
@@ -1130,18 +1158,30 @@ func (mw *GinJWTMiddleware[K]) ParseTokenFromString(token string, opts *Options)
 	}, mw.ParseOptions...)
 }
 
-func (mw *GinJWTMiddleware[K]) checkIfJWK(opts *Options) bool {
+func (mw *GinJWTMiddleware[K]) checkIfJWK(opts *Options) *Options {
 	signerName := opts.SignerName
+	defaultSigner := mw.DefaultSigner
+	fmt.Println(defaultSigner)
+	if signerName == "" && mw.DefaultSigner == nil {
+		return nil
+	}
+
 	if signerName == "" {
-		return false
+		signerName = mw.DefaultSigner.Name
 	}
 
 	key, ok := mw.Keys[signerName]
 	if !ok {
-		return ok
+		return nil
 	}
 
-	return key.IsJWK
+	if key.IsJWK {
+		return &Options{
+			SignerName: signerName,
+		}
+	}
+
+	return nil
 
 }
 

@@ -1843,3 +1843,174 @@ func TestSignTokenString(t *testing.T) {
 		assert.NotEmpty(t, token)
 	})
 }
+
+func ginTestHandler(auth *GinJWTMiddleware[*Login]) *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+
+	tonic.SetErrorHook(ErrHook)
+	group := r.Group("/auth")
+	group.Use(auth.MiddlewareFunc())
+	{
+		group.GET("/hello", helloHandler)
+	}
+
+	return r
+}
+
+func TestMiddlewareWithOpts(t *testing.T) {
+	publicKeyJwkBytes, privateKeyJwkBytes := generateJWKSJsons(t)
+
+	// Create JWSProviderImpl instance
+	authMiddleware, err := New(&GinJWTMiddleware[*Login]{
+		SigningAlgorithm: "RS512",
+		Realm:            "test zone",
+		Key:              key,
+		Timeout:          time.Hour,
+		MaxRefresh:       time.Hour * 24,
+		SendCookie:       true,
+		CookieName:       "jwt",
+		Authenticator:    defaultAuthenticator,
+		RefreshResponse: func(c *gin.Context, code int, token string, t time.Time) (*AuthResponse, error) {
+			cookie, err := c.Cookie("jwt")
+			if err != nil {
+				return nil, err
+			}
+
+			return &AuthResponse{
+				Code:    http.StatusOK,
+				Token:   token,
+				Expire:  t.Format(time.RFC3339),
+				Message: "refresh successfully",
+				Cookie:  cookie,
+			}, nil
+		},
+	}, Signer{
+		Name: "test",
+		Keys: []Key{
+			{
+				Data:  publicKeyJwkBytes,
+				IsJWK: true,
+			},
+			{
+				Data:  privateKeyJwkBytes,
+				IsJWK: true,
+			},
+		},
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	opt := &Options{
+		"test",
+	}
+
+	t.Run("It sets DefaultOptions given a valid Option passed to the MiddlewareFunc", func(t *testing.T) {
+
+		authMiddleware.MiddlewareFunc(opt)
+		assert.Equal(t, authMiddleware.DefaultOptions, opt)
+
+	})
+
+	mappedClaims := jwt.MapClaims{
+		"username": "admin",
+		"password": "12345",
+	}
+
+	authMiddleware.MiddlewareFunc(opt)
+	handler := ginTestHandler(authMiddleware)
+	testToken, err := authMiddleware.CreateToken(mappedClaims, opt)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r := gofight.New()
+
+	t.Run("it parses a JWK given opts passed to MiddlewareFunc", func(t *testing.T) {
+
+		r.GET("/auth/hello").
+			SetHeader(gofight.H{
+				"Authorization": "Bearer " + testToken.Token,
+			}).
+			Run(handler, func(r gofight.HTTPResponse, rq gofight.HTTPRequest) {
+				assert.Equal(t, http.StatusOK, r.Code)
+			})
+
+	})
+}
+
+func TestDefaultSigner(t *testing.T) {
+
+	publicKeyJwkBytes, privateKeyJwkBytes := generateJWKSJsons(t)
+
+	// Create JWSProviderImpl instance
+	authMiddleware, err := New(&GinJWTMiddleware[*Login]{
+		DefaultSigner: &Signer{
+			Name: "test",
+			Keys: []Key{
+				{
+					Data:  publicKeyJwkBytes,
+					IsJWK: true,
+				},
+				{
+					Data:  privateKeyJwkBytes,
+					IsJWK: true,
+				},
+			},
+		},
+		SigningAlgorithm: "RS512",
+		Realm:            "test zone",
+		Key:              key,
+		Timeout:          time.Hour,
+		MaxRefresh:       time.Hour * 24,
+		SendCookie:       true,
+		CookieName:       "jwt",
+		Authenticator:    defaultAuthenticator,
+		RefreshResponse: func(c *gin.Context, code int, token string, t time.Time) (*AuthResponse, error) {
+			cookie, err := c.Cookie("jwt")
+			if err != nil {
+				return nil, err
+			}
+
+			return &AuthResponse{
+				Code:    http.StatusOK,
+				Token:   token,
+				Expire:  t.Format(time.RFC3339),
+				Message: "refresh successfully",
+				Cookie:  cookie,
+			}, nil
+		},
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mappedClaims := jwt.MapClaims{
+		"username": "admin",
+		"password": "12345",
+	}
+
+	handler := ginTestHandler(authMiddleware)
+	testToken, err := authMiddleware.CreateToken(mappedClaims)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r := gofight.New()
+
+	t.Run("it signs using the default signer", func(t *testing.T) {
+
+		r.GET("/auth/hello").
+			SetHeader(gofight.H{
+				"Authorization": "Bearer " + testToken.Token,
+			}).
+			Run(handler, func(r gofight.HTTPResponse, rq gofight.HTTPRequest) {
+				assert.Equal(t, http.StatusOK, r.Code)
+			})
+
+	})
+
+}
