@@ -524,8 +524,6 @@ func (mw *GinJWTMiddleware[K]) MiddlewareInit(signers ...Signer) error {
 			}
 		}
 
-		fmt.Println(mw.DefaultSigner)
-
 		if defaultSigner := mw.DefaultSigner; defaultSigner != nil {
 
 			for _, key := range defaultSigner.Keys {
@@ -1160,8 +1158,6 @@ func (mw *GinJWTMiddleware[K]) ParseTokenFromString(token string, opts *Options)
 
 func (mw *GinJWTMiddleware[K]) checkIfJWK(opts *Options) *Options {
 	signerName := opts.SignerName
-	defaultSigner := mw.DefaultSigner
-	fmt.Println(defaultSigner)
 	if signerName == "" && mw.DefaultSigner == nil {
 		return nil
 	}
