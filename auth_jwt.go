@@ -15,6 +15,8 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/golang-jwt/jwt/v4"
 	jujuErr "github.com/juju/errors"
+
+	"github.com/go-jose/go-jose/v4/jose-util/generator"
 	"github.com/loopfz/gadgeto/tonic"
 	"github.com/youmark/pkcs8"
 )
@@ -261,6 +263,11 @@ type Signer struct {
 	Keys []Key
 }
 
+type GeneratedKeys struct {
+	Public  string
+	Private string
+}
+
 // New for check error with GinJWTMiddleware
 func New[K interface{}](m *GinJWTMiddleware[K], signers ...Signer) (*GinJWTMiddleware[K], error) {
 	if err := m.MiddlewareInit(signers...); err != nil {
@@ -268,6 +275,42 @@ func New[K interface{}](m *GinJWTMiddleware[K], signers ...Signer) (*GinJWTMiddl
 	}
 
 	return m, nil
+}
+
+func GenerateJWKSJsons() (*GeneratedKeys, error) {
+	keyUsage := "sig"
+	keyAlgorithm := jose.RS512
+	publicKey, privateKey, err := generator.NewSigningKey(keyAlgorithm, 2048)
+	if err != nil {
+		return nil, err
+	}
+
+	publicKeyJwk := &jose.JSONWebKey{
+		Key:       publicKey,
+		Algorithm: string(keyAlgorithm),
+		Use:       keyUsage,
+	}
+
+	privateKeyJwk := &jose.JSONWebKey{
+		Key:       privateKey,
+		Algorithm: string(keyAlgorithm),
+		Use:       keyUsage,
+	}
+
+	publicKeyJwkBytes, err := publicKeyJwk.MarshalJSON()
+	if err != nil {
+		return nil, err
+	}
+
+	privateKeyJwkBytes, err := privateKeyJwk.MarshalJSON()
+	if err != nil {
+		return nil, err
+	}
+
+	return &GeneratedKeys{
+		Public:  string(publicKeyJwkBytes),
+		Private: string(privateKeyJwkBytes),
+	}, nil
 }
 
 func (mw *GinJWTMiddleware[K]) readKey(
