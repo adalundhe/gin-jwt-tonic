@@ -882,8 +882,16 @@ func (mw *GinJWTMiddleware[K]) RefreshHandler(c *gin.Context) (*AuthResponse, er
 	return mw.RefreshResponse(c, http.StatusOK, tokenString, expire)
 }
 
-func (mw *GinJWTMiddleware[K]) RefreshIfRequired(token string, opts *Options) (*GeneratedToken, error) {
-	claims, expired, err := mw.CheckIfExpired(token, opts)
+func (mw *GinJWTMiddleware[K]) RefreshIfRequired(token string, opts ...*Options) (*GeneratedToken, error) {
+
+	var options *Options
+	if len(opts) > 0 {
+		options = opts[0]
+	} else {
+		options = mw.DefaultOptions
+	}
+
+	claims, expired, err := mw.CheckIfExpired(token, options)
 	if err != nil {
 		return &GeneratedToken{
 			Token:  "",
@@ -912,7 +920,7 @@ func (mw *GinJWTMiddleware[K]) RefreshIfRequired(token string, opts *Options) (*
 	expire := mw.TimeFunc().Add(mw.TimeoutFunc(claims))
 	newClaims[mw.ExpField] = expire.Unix()
 	newClaims["orig_iat"] = mw.TimeFunc().Unix()
-	tokenString, err := mw.signedString(newToken, opts)
+	tokenString, err := mw.signedString(newToken, options)
 	if err != nil {
 		return &GeneratedToken{
 			Token:  "",
