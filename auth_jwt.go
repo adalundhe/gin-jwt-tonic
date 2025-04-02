@@ -743,7 +743,7 @@ func (mw *GinJWTMiddleware[K]) LoginHandler(c *gin.Context, req K) (*AuthRespons
 	}
 
 	// Create the token
-	generated, err := mw.CreateToken(data, mw.DefaultOptions)
+	generated, err := mw.createToken(data, mw.DefaultOptions)
 	if err != nil {
 		return nil, jujuErr.NewUnauthorized(nil, err.Error())
 	}
@@ -755,7 +755,22 @@ func (mw *GinJWTMiddleware[K]) LoginHandler(c *gin.Context, req K) (*AuthRespons
 	return mw.LoginResponse(c, http.StatusOK, generated.Token, generated.Expire)
 }
 
-func (mw *GinJWTMiddleware[K]) CreateToken(data interface{}, opts ...*Options) (*GeneratedToken, error) {
+func (mw *GinJWTMiddleware[K]) CreateToken(claims jwt.MapClaims, opts ...*Options) (*GeneratedToken, error) {
+	token := jwt.New(jwt.GetSigningMethod(mw.SigningAlgorithm))
+	tokenClaims := token.Claims.(jwt.MapClaims)
+
+	for key, value := range claims {
+		tokenClaims[key] = value
+	}
+
+	return mw.generateToken(
+		token,
+		claims,
+		opts...,
+	)
+}
+
+func (mw *GinJWTMiddleware[K]) createToken(data interface{}, opts ...*Options) (*GeneratedToken, error) {
 	token := jwt.New(jwt.GetSigningMethod(mw.SigningAlgorithm))
 	claims := token.Claims.(jwt.MapClaims)
 
@@ -765,6 +780,19 @@ func (mw *GinJWTMiddleware[K]) CreateToken(data interface{}, opts ...*Options) (
 		}
 	}
 
+	return mw.generateToken(
+		token,
+		claims,
+		opts...,
+	)
+
+}
+
+func (mw *GinJWTMiddleware[K]) generateToken(
+	token *jwt.Token,
+	claims jwt.MapClaims,
+	opts ...*Options,
+) (*GeneratedToken, error) {
 	var options *Options
 	if len(opts) > 0 {
 		options = opts[0]

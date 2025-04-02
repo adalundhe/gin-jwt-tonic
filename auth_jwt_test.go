@@ -1917,6 +1917,9 @@ func TestMiddlewareWithOpts(t *testing.T) {
 	mappedClaims := jwt.MapClaims{
 		"username": "admin",
 		"password": "12345",
+		"exp":      time.Now().Add(time.Hour * 1).Unix(),
+		"orig_iat": time.Now(),
+		"nbf":      time.Now(),
 	}
 
 	authMiddleware.MiddlewareFunc(opt)
@@ -1991,6 +1994,9 @@ func TestDefaultSigner(t *testing.T) {
 	mappedClaims := jwt.MapClaims{
 		"username": "admin",
 		"password": "12345",
+		"exp":      time.Now().Add(time.Hour * 1).Unix(),
+		"orig_iat": time.Now(),
+		"nbf":      time.Now(),
 	}
 
 	handler := ginTestHandler(authMiddleware)
