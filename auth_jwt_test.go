@@ -287,7 +287,7 @@ func TestLoginHandler(t *testing.T) {
 			}
 			return "", ErrFailedAuthentication
 		},
-		Authorizator: func(user interface{}, c *gin.Context) bool {
+		Validator: func(user interface{}, c *gin.Context) bool {
 			return true
 		},
 		LoginResponse: func(c *gin.Context, code int, token string, t time.Time) (*AuthResponse, error) {
@@ -692,7 +692,7 @@ func TestExpiredTokenOnRefreshHandler(t *testing.T) {
 		})
 }
 
-func TestAuthorizator(t *testing.T) {
+func TestValidator(t *testing.T) {
 	// the middleware to test
 	authMiddleware, _ := New(&GinJWTMiddleware[*Login]{
 		Realm:         "test zone",
@@ -700,8 +700,11 @@ func TestAuthorizator(t *testing.T) {
 		Timeout:       time.Hour,
 		MaxRefresh:    time.Hour * 24,
 		Authenticator: defaultAuthenticator,
-		Authorizator: func(data interface{}, c *gin.Context) bool {
-			return data.(string) == "admin"
+		Validator: func(data interface{}, c *gin.Context) bool {
+			mapped := data.(jwt.MapClaims)
+			identity := mapped["identity"].(string)
+
+			return identity == "admin"
 		},
 	})
 
@@ -792,7 +795,7 @@ func TestClaimsDuringAuthorization(t *testing.T) {
 
 			return "Guest", ErrFailedAuthentication
 		},
-		Authorizator: func(user interface{}, c *gin.Context) bool {
+		Validator: func(user interface{}, c *gin.Context) bool {
 			jwtClaims := ExtractClaims(c)
 
 			if jwtClaims["identity"] == "administrator" {
@@ -1168,8 +1171,10 @@ func TestSendAuthorizationBool(t *testing.T) {
 		MaxRefresh:        time.Hour * 24,
 		Authenticator:     defaultAuthenticator,
 		SendAuthorization: true,
-		Authorizator: func(data interface{}, c *gin.Context) bool {
-			return data.(string) == "admin"
+		Validator: func(data interface{}, c *gin.Context) bool {
+			mapped := data.(jwt.MapClaims)
+			identity := mapped["identity"].(string)
+			return identity == "admin"
 		},
 	})
 
@@ -1206,8 +1211,10 @@ func TestExpiredTokenOnAuth(t *testing.T) {
 		MaxRefresh:        time.Hour * 24,
 		Authenticator:     defaultAuthenticator,
 		SendAuthorization: true,
-		Authorizator: func(data interface{}, c *gin.Context) bool {
-			return data.(string) == "admin"
+		Validator: func(data interface{}, c *gin.Context) bool {
+			mapped := data.(jwt.MapClaims)
+			identity := mapped["identity"].(string)
+			return identity == "admin"
 		},
 		TimeFunc: func() time.Time {
 			return time.Now().AddDate(0, 0, 1)
@@ -1430,7 +1437,7 @@ func TestCreateToken(t *testing.T) {
 			}
 			return "", ErrFailedAuthentication
 		},
-		Authorizator: func(user interface{}, c *gin.Context) bool {
+		Validator: func(user interface{}, c *gin.Context) bool {
 			return true
 		},
 		LoginResponse: func(c *gin.Context, code int, token string, t time.Time) (*AuthResponse, error) {
